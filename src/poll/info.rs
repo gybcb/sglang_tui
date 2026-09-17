@@ -77,6 +77,11 @@ fn meta_from(model: &Value, server: &Value) -> ServerMeta {
             .and_then(Value::as_u64)
             .or_else(|| server.get("context_len").and_then(Value::as_u64)),
         loaded: true,
+        // Startup timeline is a numeric-path read (from /metrics), not meta —
+        // build() repopulates these each tick after this projection lands.
+        startup_phases: Vec::new(),
+        startup_graph_secs: None,
+        startup_free_gpu_gb: None,
     }
 }
 

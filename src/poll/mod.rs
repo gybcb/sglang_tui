@@ -334,6 +334,27 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         };
     }
     s.engine.new_token_ratio = first_val("sglang:new_token_ratio");
+    // Startup timeline (constant after boot; rides the meta section of the
+    // info overlay). Longest phase first — the headline is the bottleneck.
+    {
+        let mut phases: Vec<(String, f64)> = m
+            .get("sglang:startup_time_seconds")
+            .filter(|x| !x.value.is_nan())
+            .filter_map(|x| x.label("phase").map(|p| (p.to_string(), x.value)))
+            .collect();
+        phases.sort_by(|a, b| b.1.total_cmp(&a.1));
+        if !phases.is_empty() {
+            s.server.startup_phases = phases;
+            s.server.startup_graph_secs = m
+                .get("sglang:startup_cuda_graph_time_seconds")
+                .filter(|x| !x.value.is_nan())
+                .map(|x| x.value)
+                .sum::<f64>()
+                .into();
+            s.server.startup_free_gpu_gb =
+                sum_if_present(m, "sglang:startup_available_gpu_memory_gb");
+        }
+    }
     s.kv.weight_gb = sum_if_present(m, "sglang:weight_memory_usage_gb");
     s.kv.kv_cache_gb = sum_if_present(m, "sglang:kv_cache_memory_usage_gb");
     s.kv.graph_gb = sum_if_present(m, "sglang:graph_memory_usage_gb");
@@ -732,6 +753,10 @@ sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="
 sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",mode="decode_none"} 200
 sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",mode="prefill_none"} 50
 sglang:new_token_ratio{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"} 0.4
+sglang:startup_time_seconds{model_name="qwen",engine_type="unified",phase="load_weight"} 193.1
+sglang:startup_time_seconds{model_name="qwen",engine_type="unified",phase="scheduler_e2e"} 245.1
+sglang:startup_cuda_graph_time_seconds{model_name="qwen",engine_type="unified",phase="target_verify"} 2.8
+sglang:startup_available_gpu_memory_gb{model_name="qwen",engine_type="unified"} 7.5
 sglang:fwd_occupancy{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"} 92.5
 sglang:generation_tokens_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="0"} 500000
 sglang:generation_tokens_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="1"} 480000
@@ -792,6 +817,17 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         let s = two_builds(0);
         assert_eq!(s.kv.used_tokens, 2000);
         assert_eq!(s.kv.total_tokens, 120000);
+    }
+
+    #[test]
+    fn startup_timeline_sorts_bottleneck_first() {
+        let s = two_builds(0);
+        let p = &s.server.startup_phases;
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].0, "scheduler_e2e", "longest phase first");
+        assert!((p[0].1 - 245.1).abs() < 1e-9);
+        assert!((s.server.startup_graph_secs.unwrap() - 2.8).abs() < 1e-9);
+        assert!((s.server.startup_free_gpu_gb.unwrap() - 7.5).abs() < 1e-9);
     }
 
     #[test]

@@ -66,6 +66,18 @@ fn meta_row(label: &str, value: &str, th: &Theme) -> Line<'static> {
     ])
 }
 
+/// meta_row with a wider label column, for the startup block where some
+/// phase names (`kv_cache_allocation`) outgrow 16 and glue onto the value.
+fn wide_row(label: &str, value: &str, th: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<20}"),
+            Style::default().fg(th.c("title")).bold(),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(th.c("main_fg"))),
+    ])
+}
+
 /// Live poll-control state the options menu reflects (snapshot of `PollControl`
 /// taken by `App::draw` so the overlay never holds a lock while rendering).
 #[derive(Debug, Clone, Copy)]
@@ -247,6 +259,26 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
         },
         th,
     ));
+    // Startup timeline: why boot took as long as it did, without logs.
+    if !s.startup_phases.is_empty() {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "startup",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        // Phase names are dynamic and some are long — pad to 20 so values
+        // never glue onto the label (meta_row's 16 would clip
+        // "kv_cache_allocation" into the number).
+        for (phase, secs) in &s.startup_phases {
+            v.push(wide_row(phase, &format!("{secs:.1}s"), th));
+        }
+        if let Some(g) = s.startup_graph_secs {
+            v.push(wide_row("graph capture", &format!("{g:.1}s"), th));
+        }
+        if let Some(free) = s.startup_free_gpu_gb {
+            v.push(wide_row("free gpu @boot", &format!("{free:.1} GB"), th));
+        }
+    }
     if !s.loaded {
         v.push(Line::from(Span::styled(
             "metadata not yet fetched (auth-gated /server_info)",

@@ -114,6 +114,14 @@ pub struct ServerMeta {
     pub context_len: Option<u64>,
     /// True once at least one info fetch has populated the above.
     pub loaded: bool,
+    /// Engine startup duration by phase (`startup_time_seconds{phase=…}`),
+    /// longest phase first, plus graph-capture seconds and the GPU memory
+    /// that was free when startup began. Empty on builds without the family.
+    /// Answers "why did this server take 4 minutes to come up" without
+    /// digging through logs.
+    pub startup_phases: Vec<(String, f64)>,
+    pub startup_graph_secs: Option<f64>,
+    pub startup_free_gpu_gb: Option<f64>,
 }
 
 /// Top strip — btop's CPU-box analog (headline time-series + total meter +
