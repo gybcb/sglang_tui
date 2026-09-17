@@ -283,6 +283,46 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             v.push(wide_row("free gpu @boot", &format!("{free:.1} GB"), th));
         }
     }
+    // Full latency percentile set — every family the server exposes, not
+    // just the two that fit the traffic panel's nine interior rows (itl/e2e
+    // silently clip there). Same rationale as the stage block below: the
+    // panel has no spare row, the overlay has the room.
+    let lat = &snap.traffic.latency;
+    let lat_rows = [
+        ("queue", lat.known[0], lat.queue),
+        ("ttft", lat.known[1], lat.ttft),
+        ("itl", lat.known[2], lat.itl),
+        ("e2e", lat.known[3], lat.e2e),
+    ];
+    if lat_rows.iter().any(|(_, k, _)| *k) {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "latency percentiles",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        for (label, known, p) in lat_rows {
+            if !known {
+                continue;
+            }
+            let value = match p {
+                Some(p) => {
+                    let mean = p
+                        .mean
+                        .map(crate::ui::panels::human::human_duration)
+                        .unwrap_or_else(|| "—".into());
+                    format!(
+                        "p50 {}  p90 {}  p99 {}  avg {}",
+                        crate::ui::panels::human::human_duration(p.p50),
+                        crate::ui::panels::human::human_duration(p.p90),
+                        crate::ui::panels::human::human_duration(p.p99),
+                        mean,
+                    )
+                }
+                None => "—".into(),
+            };
+            v.push(wide_row(label, &value, th));
+        }
+    }
     // Request-lifecycle stages: where a served request spends its time,
     // slowest first. Same shape as the startup block (phase → seconds, read
     // from the server, never hardcoded) and the same rationale for living
@@ -410,6 +450,43 @@ mod tests {
             30,
         );
         assert!(text.contains("Qwen3.8-Flash-Next"), "{text}");
+    }
+
+    // The overlay lists every exposed latency family — including itl/e2e,
+    // which the traffic panel clips at common heights.
+    #[test]
+    fn server_info_lists_latency_percentiles() {
+        let mut snap = Snapshot::default();
+        snap.server.loaded = true;
+        snap.traffic.latency.known = [true, true, true, true];
+        snap.traffic.latency.queue = Some(crate::model::snapshot::Percentile {
+            p50: 0.004,
+            p90: 0.021,
+            p99: 0.048,
+            mean: Some(0.012),
+        });
+        snap.traffic.latency.itl = Some(crate::model::snapshot::Percentile {
+            p50: 0.031,
+            p90: 0.052,
+            p99: 0.061,
+            mean: None,
+        });
+        let text = render_overlay(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &snap,
+            false,
+            1000,
+            80,
+            44,
+        );
+        assert!(text.contains("latency percentiles"), "{text}");
+        assert!(text.contains("queue") && text.contains("4ms"), "{text}");
+        assert!(text.contains("itl") && text.contains("31ms"), "{text}");
+        // Family known but no delta yet: e2e shows an em-dash, never a
+        // fabricated percentile (48ms is queue's p99, not e2e's).
+        assert!(text.contains("e2e") && text.contains('—'), "{text}");
+        assert!(!text.contains("e2e             48ms"), "{text}");
     }
 
     // The stage breakdown needs more rows than the base 26 — the panel
