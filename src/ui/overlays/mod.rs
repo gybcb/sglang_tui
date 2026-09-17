@@ -378,14 +378,35 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             // fraction of a request per second, and human_count's u64 cast
             // would render every quiet route as an identical 0. One decimal
             // below 100 keeps the column readable without false precision.
-            v.push(wide_row(
-                &path,
-                &format!(
+            // A route with errors gets a ` err N` tail in the alarm colour —
+            // the aggregate err_rate can't say *which* route is failing, and a
+            // client hammering a wrong-method route otherwise reads as healthy.
+            let value = if e.err > 0 {
+                format!(
+                    "{rate:.1}/s  total {}  err {}",
+                    crate::ui::panels::human::human_count(e.total),
+                    crate::ui::panels::human::human_count(e.err),
+                )
+            } else {
+                format!(
                     "{rate:.1}/s  total {}",
                     crate::ui::panels::human::human_count(e.total),
+                )
+            };
+            v.push(Line::from(vec![
+                Span::styled(
+                    format!("{path:<20}"),
+                    Style::default().fg(th.c("title")).bold(),
                 ),
-                th,
-            ));
+                Span::styled(
+                    value,
+                    Style::default().fg(if e.err > 0 {
+                        th.c("hi_fg")
+                    } else {
+                        th.c("main_fg")
+                    }),
+                ),
+            ]));
         }
     }
     // All-time mean request lengths. The traffic panel's `len` row shows the
@@ -604,11 +625,16 @@ mod tests {
                 path: "/generate".into(),
                 rps: Some(12.0),
                 total: 34567,
+                err: 0,
             },
+            // A route being hammered with the wrong method: healthy-looking
+            // rate, every response an error. The aggregate err_rate can't
+            // localise this; the route row must.
             crate::model::snapshot::HttpEndpoint {
-                path: "/health".into(),
-                rps: None,
-                total: 9,
+                path: "/v1/responses/input_tokens".into(),
+                rps: Some(0.0),
+                total: 60,
+                err: 60,
             },
         ];
         let text = render_overlay(
@@ -625,8 +651,8 @@ mod tests {
             text.contains("/generate") && text.contains("12.0/s") && text.contains("total 34.6k"),
             "{text}"
         );
-        assert!(!text.contains("/health"), "{text}");
-        // ^ unrated route (no baseline) gets no row: the block lists what's
-        // being served, not every route the server has ever registered.
+        // Long path truncated at the label column, with its error count.
+        assert!(text.contains("/v1/responses/input…"), "{text}");
+        assert!(text.contains("err 60"), "{text}");
     }
 }

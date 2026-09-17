@@ -534,7 +534,12 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             })
             .collect();
         let mut agg: Option<f64> = None;
-        let mut by_ep: std::collections::BTreeMap<String, (Option<f64>, u64)> =
+        // (window_rps, lifetime_total, lifetime_errors) per route. Errors are
+        // joined from http_responses_total{status>=400} on the endpoint label
+        // below — an aggregate err_rate hides *which* route is failing, and
+        // a client hammering a wrong-method route reads identical to healthy
+        // traffic there.
+        let mut by_ep: std::collections::BTreeMap<String, (Option<f64>, u64, u64)> =
             std::collections::BTreeMap::new();
         for (key, endpoint, value) in &req_pts {
             let r = rates.rate(key, now, *value);
@@ -550,22 +555,8 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             }
         }
         s.traffic.http_rps = agg;
-        let mut eps: Vec<crate::model::snapshot::HttpEndpoint> = by_ep
-            .into_iter()
-            .map(|(path, (rps, total))| crate::model::snapshot::HttpEndpoint { path, rps, total })
-            .collect();
-        // Busiest first; lifetime count breaks rate ties (and orders an
-        // entirely quiet server's endpoints by historical share).
-        eps.sort_by(|a, b| {
-            b.rps
-                .unwrap_or(0.0)
-                .partial_cmp(&a.rps.unwrap_or(0.0))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.total.cmp(&a.total))
-        });
-        eps.truncate(12); // endpoint cardinality is a fixed route list; cap anyway (R8)
-        s.traffic.http_endpoints = eps;
-        // Errors: responses with status >= 400 over the same window.
+        // Errors: responses with status >= 400 over the same window, both as
+        // the aggregate rate and folded per-route into the endpoint list.
         let err_pts: Vec<(String, f64)> = m
             .get("sglang:http_responses_total")
             .filter(|x| {
@@ -582,6 +573,43 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         } else {
             rates.rate_sum(now, err_pts.iter().map(|(k, v)| (k.as_str(), *v)))
         };
+        for x in m.get("sglang:http_responses_total") {
+            let err = x
+                .label("status_code")
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0)
+                >= 400;
+            if err && !mine(x) && x.value.is_finite() {
+                let ep = x.label("endpoint").unwrap_or("?");
+                // Only routes the requests family already listed; an error on
+                // an unlisted route is folded into the aggregate, not faked in.
+                if let Some(e) = by_ep.get_mut(ep) {
+                    e.2 += x.value as u64;
+                }
+            }
+        }
+        let mut eps: Vec<crate::model::snapshot::HttpEndpoint> = by_ep
+            .into_iter()
+            .map(
+                |(path, (rps, total, err))| crate::model::snapshot::HttpEndpoint {
+                    path,
+                    rps,
+                    total,
+                    err,
+                },
+            )
+            .collect();
+        // Busiest first; lifetime count breaks rate ties (and orders an
+        // entirely quiet server's endpoints by historical share).
+        eps.sort_by(|a, b| {
+            b.rps
+                .unwrap_or(0.0)
+                .partial_cmp(&a.rps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.total.cmp(&a.total))
+        });
+        eps.truncate(12); // endpoint cardinality is a fixed route list; cap anyway (R8)
+        s.traffic.http_endpoints = eps;
         s.traffic.http_active = {
             let mut sum = 0.0f64;
             let mut any = false;
@@ -1792,6 +1820,57 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
             .expect("new route listed");
         assert_eq!(new.rps, None, "no baseline yet — not a fake 0");
         assert_eq!(new.total, 1, "lifetime count is known immediately");
+    }
+
+    // Errors fold onto the route that caused them: the aggregate err_rate
+    // says *that* traffic is failing, the route row says *which*. Mirrors
+    // the real server's /v1/responses/input_tokens — 60 requests, 60× 405.
+    #[test]
+    fn http_errors_fold_onto_the_failing_route() {
+        let scrape = |req: u64, err: u64| {
+            format!(
+                "sglang:http_requests_total{{endpoint=\"/good\"}} {req}\n\
+                 sglang:http_requests_total{{endpoint=\"/bad\"}} {req}\n\
+                 sglang:http_responses_total{{endpoint=\"/good\",status_code=\"200\"}} {req}\n\
+                 sglang:http_responses_total{{endpoint=\"/bad\",status_code=\"405\"}} {err}\n"
+            )
+        };
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(
+            &prom::parse(&scrape(10, 10)),
+            &mut st,
+            t0,
+            Duration::from_millis(5),
+            &mut s,
+        );
+        let find = |p: &str| {
+            s.traffic
+                .http_endpoints
+                .iter()
+                .find(|e| e.path == p)
+                .unwrap()
+        };
+        assert_eq!(find("/bad").err, 10, "all its responses were 405");
+        assert_eq!(find("/good").err, 0);
+        // Errors on a route the requests family never listed are not faked
+        // into the endpoint list; they live only in the aggregate.
+        build(
+            &prom::parse(
+                "sglang:http_requests_total{endpoint=\"/good\"} 20\n\
+                          sglang:http_responses_total{endpoint=\"/good\",status_code=\"200\"} 20\n\
+                          sglang:http_responses_total{endpoint=\"/ghost\",status_code=\"500\"} 5\n",
+            ),
+            &mut st,
+            t0 + Duration::from_secs(1),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        assert!(
+            s.traffic.http_endpoints.iter().all(|e| e.path != "/ghost"),
+            "unlisted error route stays out"
+        );
     }
 
     // The windowed cache share is a *ratio*, not another counter: it needs

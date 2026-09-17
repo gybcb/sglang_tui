@@ -320,6 +320,11 @@ pub struct HttpEndpoint {
     pub rps: Option<f64>,
     /// Lifetime count of requests served on this route.
     pub total: u64,
+    /// Lifetime count of 4xx/5xx responses on this route. Non-zero alongside a
+    /// healthy rps is the signal: this route is failing (a client hammering a
+    /// wrong-method endpoint looks identical to healthy traffic in the
+    /// aggregate err_rate).
+    pub err: u64,
 }
 
 /// Left bottom — btop's NET-box analog. The NET triple is current/peak/accum
