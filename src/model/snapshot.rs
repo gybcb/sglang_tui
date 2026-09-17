@@ -206,6 +206,11 @@ pub struct KvPanel {
     /// absent → suffix hidden.
     pub swa_available: Option<u64>,
     pub mamba_available: Option<u64>,
+    /// Radix-cached slots per sub-pool — the `free` count's counterpart, and
+    /// the pair's punchline: `free 0  evict 30` says the visible headroom is
+    /// all cache that must be recomputed before reuse. None = family absent.
+    pub swa_evictable: Option<u64>,
+    pub mamba_evictable: Option<u64>,
     pub available_tokens: Option<u64>,
     pub evictable_tokens: Option<u64>,
     /// Lifetime tokens evicted from the device pool (`evicted_tokens_total`);
@@ -276,6 +281,8 @@ impl Default for KvPanel {
             mamba_used: None,
             swa_available: None,
             mamba_available: None,
+            swa_evictable: None,
+            mamba_evictable: None,
             available_tokens: None,
             evictable_tokens: None,
             evicted_total: None,

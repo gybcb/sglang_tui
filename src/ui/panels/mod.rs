@@ -279,19 +279,21 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
     }
 
     // Sub-pool ratios appear only when this model has those pools.
-    for (label, v, used, avail) in [
-        ("full", s.kv.full_token_usage, None, None),
+    for (label, v, used, avail, evict) in [
+        ("full", s.kv.full_token_usage, None, None, None),
         (
             "swa",
             s.kv.swa_token_usage,
             s.kv.swa_used,
             s.kv.swa_available,
+            s.kv.swa_evictable,
         ),
         (
             "mamba",
             s.kv.mamba_usage,
             s.kv.mamba_used,
             s.kv.mamba_available,
+            s.kv.mamba_evictable,
         ),
     ] {
         if let Some(v) = v {
@@ -325,6 +327,15 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
                     } else {
                         th.c("graph_text")
                     }),
+                ));
+            }
+            // The evictable counterpart completes the story: `free 0
+            // evict 30` says every spare slot is cache awaiting eviction —
+            // appended last so narrow panels clip it before the free alarm.
+            if let Some(e) = evict {
+                row.push(Span::styled(
+                    format!("  evict {e}"),
+                    Style::default().fg(th.c("graph_text")),
                 ));
             }
             lines.push(Line::from(row));
@@ -911,26 +922,34 @@ mod tests {
         }
     }
 
-    // The sub-pool free-slot count is the ratio's missing half: a pool can
-    // read a low ratio yet have zero truly-free slots (all headroom is radix
-    // cache). free appears only when the gauge exists; a family-absent model
-    // shows no `free` (not a false `free 0`).
+    // The sub-pool free/evict pair is the ratio's missing halves: a pool can
+    // read a low usage ratio yet have zero truly-free slots with all its
+    // headroom as radix cache. Both appear only when the gauges exist; a
+    // family-absent model shows neither (not a false `free 0  evict 0`).
     #[test]
     fn subpool_free_count_follows_family_presence() {
-        // Default snapshot: hybrid gauges absent → no `free` text at all.
-        let baseline = render_kv(&Snapshot::default(), 44);
+        // Default snapshot: hybrid gauges absent → no `free`/`evict` at all.
+        let baseline = render_kv(&Snapshot::default(), 52);
         assert!(!baseline.contains("free"), "{baseline}");
 
         let mut s = Snapshot::default();
         s.kv.swa_token_usage = Some(0.0);
         s.kv.swa_used = Some(0);
         s.kv.swa_available = Some(0);
+        s.kv.swa_evictable = Some(0);
         s.kv.mamba_usage = Some(0.2);
         s.kv.mamba_used = Some(8);
         s.kv.mamba_available = Some(2);
-        let text = render_kv(&s, 44);
-        assert!(text.contains("swa") && text.contains("free 0"), "{text}");
-        assert!(text.contains("mamba") && text.contains("free 2"), "{text}");
+        s.kv.mamba_evictable = Some(30);
+        let text = render_kv(&s, 52);
+        assert!(
+            text.contains("swa") && text.contains("free 0  evict 0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("mamba") && text.contains("free 2  evict 30"),
+            "{text}"
+        );
     }
 
     #[test]
