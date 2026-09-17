@@ -141,6 +141,16 @@ pub struct EnginePanel {
     /// None = `process_cpu_seconds_total` absent.
     pub tokenizer_cores: Option<f64>,
     pub detokenizer_cores: Option<f64>,
+    /// Share of decode forward passes executed under CUDA graph
+    /// (`cuda_graph_passes_total{mode="decode_*"}`). Silent degradation
+    /// detector: graphs off (batch shape escaped capture, flag off) and
+    /// decode throughput drops with no error anywhere. None = family absent.
+    pub cg_decode_share: Option<f64>,
+    /// Scheduler admission-pressure dial (`new_token_ratio`): the estimated
+    /// remaining-tokens fraction used to admit new requests. It decays as the
+    /// pool tightens — low alongside high token-usage means the scheduler is
+    /// throttling admission for memory. None = family absent.
+    pub new_token_ratio: Option<f64>,
 }
 
 impl Default for EnginePanel {
@@ -158,6 +168,8 @@ impl Default for EnginePanel {
             waiting_reqs: 0,
             tokenizer_cores: None,
             detokenizer_cores: None,
+            cg_decode_share: None,
+            new_token_ratio: None,
         }
     }
 }
@@ -168,7 +180,6 @@ pub struct KvPanel {
     pub used_tokens: u64,
     pub total_tokens: u64,
     pub active_tokens: u64,
-    pub max_running_requests: u64,
     /// The bottleneck ratio (0..1). "misleadingly named" at source — surface
     /// the sub-pool ratios alongside and title the bar "token pool".
     pub token_usage: f64,
@@ -221,7 +232,6 @@ impl Default for KvPanel {
             used_tokens: 0,
             total_tokens: 0,
             active_tokens: 0,
-            max_running_requests: 0,
             token_usage: 0.0,
             full_token_usage: None,
             swa_token_usage: None,

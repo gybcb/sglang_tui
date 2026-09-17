@@ -111,6 +111,47 @@ pub fn engine(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) 
     }
     lines.push(Line::from(row3));
 
+    // Engine internals that fail silently: CUDA-graph coverage (decode falls
+    // out of graphs without an error — throughput drops, logs stay clean)
+    // and the admission-pressure dial (low ratio = scheduler throttling for
+    // memory). Hidden until the families exist — both are build/version
+    // gated, and an absent one must not squat the row.
+    if s.engine.cg_decode_share.is_some() || s.engine.new_token_ratio.is_some() {
+        let mut row4: Vec<Span> = Vec::new();
+        if let Some(sh) = s.engine.cg_decode_share {
+            row4.push(Span::styled(
+                "cg ",
+                Style::default().fg(th.c("title")).bold(),
+            ));
+            // A partial share is the whole point of the readout — colour it.
+            let style = if dim {
+                th.c("inactive_fg")
+            } else if sh < 0.95 {
+                th.c("hi_fg")
+            } else {
+                th.c("main_fg")
+            };
+            row4.push(Span::styled(
+                format!("{:>4.0}%", sh * 100.0),
+                Style::default().fg(style),
+            ));
+        }
+        if let Some(ntr) = s.engine.new_token_ratio {
+            if !row4.is_empty() {
+                row4.push(Span::styled("  ", Style::default()));
+            }
+            row4.push(Span::styled(
+                "admit ",
+                Style::default().fg(th.c("title")).bold(),
+            ));
+            row4.push(Span::styled(
+                format!("{:>4.0}%", ntr * 100.0),
+                Style::default().fg(th.c("main_fg")),
+            ));
+        }
+        lines.push(Line::from(row4));
+    }
+
     if let Some(reason) = &s.paused {
         lines.push(Line::from(Span::styled(
             format!("PAUSED — {reason}"),

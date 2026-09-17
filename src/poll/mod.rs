@@ -305,6 +305,35 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     }
     s.kv.cache_hit_rate = first_val("sglang:cache_hit_rate").unwrap_or(0.0);
     s.kv.cache_hit_series.push(s.kv.cache_hit_rate);
+    // CUDA-graph decode coverage, cumulative: decode passes executed under a
+    // graph over all decode passes. Modes pair {prefill,decode}×{cuda_graph,
+    // none} — match by prefix so unseen spellings ("decode_none"…) fold in.
+    // Cumulative (not windowed) is the honest long-run coverage: a graph
+    // fallback starting now shows up within a log-interval of samples.
+    {
+        let mut dec_all = 0.0f64;
+        let mut dec_cg = 0.0f64;
+        let mut any = false;
+        for x in m.get("sglang:cuda_graph_passes_total") {
+            let Some(mode) = x.label("mode") else {
+                continue;
+            };
+            if !mode.starts_with("decode") || x.value.is_nan() {
+                continue;
+            }
+            any = true;
+            dec_all += x.value;
+            if mode.contains("cuda_graph") {
+                dec_cg += x.value;
+            }
+        }
+        s.engine.cg_decode_share = if any && dec_all > 0.0 {
+            Some((dec_cg / dec_all).clamp(0.0, 1.0))
+        } else {
+            None
+        };
+    }
+    s.engine.new_token_ratio = first_val("sglang:new_token_ratio");
     s.kv.weight_gb = sum_if_present(m, "sglang:weight_memory_usage_gb");
     s.kv.kv_cache_gb = sum_if_present(m, "sglang:kv_cache_memory_usage_gb");
     s.kv.graph_gb = sum_if_present(m, "sglang:graph_memory_usage_gb");
@@ -694,6 +723,10 @@ sglang:gen_throughput{model_name="qwen",engine_type="unified",tp_rank="0",pp_ran
 sglang:gen_throughput{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="1"} 190
 sglang:cache_hit_rate{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="0"} 0.73
 sglang:utilization{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"} 0.61
+sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",mode="decode_cuda_graph"} 800
+sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",mode="decode_none"} 200
+sglang:cuda_graph_passes_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",mode="prefill_none"} 50
+sglang:new_token_ratio{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"} 0.4
 sglang:fwd_occupancy{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0"} 92.5
 sglang:generation_tokens_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="0"} 500000
 sglang:generation_tokens_total{model_name="qwen",engine_type="unified",tp_rank="0",pp_rank="0",moe_ep_rank="0",dp_rank="1"} 480000
@@ -754,6 +787,22 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         let s = two_builds(0);
         assert_eq!(s.kv.used_tokens, 2000);
         assert_eq!(s.kv.total_tokens, 120000);
+    }
+
+    #[test]
+    fn cg_share_counts_only_decode_passes() {
+        let s = two_builds(0);
+        // decode: 800 cuda_graph + 200 none = 1000 → 0.8; prefill excluded.
+        assert!(
+            (s.engine.cg_decode_share.unwrap() - 0.8).abs() < 1e-9,
+            "{:?}",
+            s.engine.cg_decode_share
+        );
+        assert!(
+            (s.engine.new_token_ratio.unwrap() - 0.4).abs() < 1e-9,
+            "{:?}",
+            s.engine.new_token_ratio
+        );
     }
 
     #[test]
