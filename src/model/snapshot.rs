@@ -217,6 +217,12 @@ pub struct KvPanel {
     /// None = family absent → row hidden. Rate is over the rolling window.
     pub evicted_total: Option<u64>,
     pub evicted_tps: Option<f64>,
+    /// Mean end-to-end duration of one device eviction pass
+    /// (`eviction_duration_seconds` sum/count); under write_back it includes
+    /// the blocking D->H copy. `gone 112M (333/s)` says how often eviction
+    /// happens — the per-pass mean says what each one costs the serving path.
+    /// None = family absent or no passes yet.
+    pub evict_pass_mean_secs: Option<f64>,
     pub cache_hit_rate: f64,
     pub cache_hit_series: Ring,
     pub weight_gb: Option<f64>,
@@ -287,6 +293,7 @@ impl Default for KvPanel {
             evictable_tokens: None,
             evicted_total: None,
             evicted_tps: None,
+            evict_pass_mean_secs: None,
             cache_hit_rate: 0.0,
             cache_hit_series: Ring::default(),
             weight_gb: None,

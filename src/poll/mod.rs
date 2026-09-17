@@ -306,6 +306,15 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             s.kv.evicted_total = Some(ev.iter().map(|(_, v)| *v as u64).sum());
             s.kv.evicted_tps = rates.rate_sum(now, ev.iter().map(|(k, v)| (k.as_str(), *v)));
         }
+        // Mean cost per eviction pass, exact from the histogram's sum/count.
+        // Zero count → None: "no passes yet" is not "passes are instant".
+        let pc = sum_across_ranks(m, "sglang:eviction_duration_seconds_count", false);
+        let ps = sum_across_ranks(m, "sglang:eviction_duration_seconds_sum", false);
+        s.kv.evict_pass_mean_secs = if pc > 0.0 && ps.is_finite() && pc.is_finite() {
+            Some(ps / pc)
+        } else {
+            None
+        };
     }
     s.kv.cache_hit_rate = first_val("sglang:cache_hit_rate").unwrap_or(0.0);
     s.kv.cache_hit_series.push(s.kv.cache_hit_rate);
@@ -1059,6 +1068,31 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert_eq!(s.kv.swa_available, Some(0), "zero free is a fact");
         assert_eq!(s.kv.mamba_available, Some(2));
         assert_eq!(s.kv.mamba_evictable, Some(30));
+    }
+
+    #[test]
+    fn evict_pass_mean_is_exact_from_histogram() {
+        let f = |extra: &str| -> Snapshot {
+            let mut st = PollState::default();
+            let mut s = Snapshot::default();
+            build(
+                &prom::parse(&format!("{FIXTURE}{extra}")),
+                &mut st,
+                Instant::now(),
+                Duration::ZERO,
+                &mut s,
+            );
+            s
+        };
+        // Family absent (base FIXTURE) → hidden, not 0.
+        assert!(f("").kv.evict_pass_mean_secs.is_none());
+        // Zero passes → still None: "no evictions yet" is not "free".
+        let zero = "sglang:eviction_duration_seconds_sum{cache_type=\"UnifiedRadixCache\"} 0\nsglang:eviction_duration_seconds_count{cache_type=\"UnifiedRadixCache\"} 0\n";
+        assert!(f(zero).kv.evict_pass_mean_secs.is_none());
+        // 34764 passes in 75.66s ≈ 2.18ms — exact sum/count, no buckets.
+        let real = "sglang:eviction_duration_seconds_sum{cache_type=\"UnifiedRadixCache\"} 75.66\nsglang:eviction_duration_seconds_count{cache_type=\"UnifiedRadixCache\"} 34764\n";
+        let m = f(real).kv.evict_pass_mean_secs.unwrap();
+        assert!((m - 0.002176).abs() < 1e-4, "{m}");
     }
 
     #[test]

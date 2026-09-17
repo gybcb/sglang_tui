@@ -259,16 +259,25 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
         ];
         // Cumulative eviction counter rides along when the family exists —
         // "how many tokens were ever evicted (rate)" vs the instantaneous
-        // free-list size on the row above.
+        // free-list size on the row above. The per-pass mean rides at the
+        // end: the rate says how often the eviction path runs, the mean says
+        // what each pass costs the serving path (write_back passes include
+        // the blocking D->H copy).
         if let Some(total) = s.kv.evicted_total {
             row.push(Span::styled(
                 "  gone ",
                 Style::default().fg(th.c("graph_text")),
             ));
+            let cost =
+                s.kv.evict_pass_mean_secs
+                    .map(|secs| format!(" {}", crate::ui::panels::human::human_duration(secs)))
+                    .unwrap_or_default();
             row.push(value_cell(
                 Some(match s.kv.evicted_tps {
-                    Some(r) => format!("{} ({}/s)", human_count(total), human_rate(r)),
-                    None => human_count(total),
+                    Some(r) => {
+                        format!("{} ({}/s){}", human_count(total), human_rate(r), cost)
+                    }
+                    None => format!("{}{cost}", human_count(total)),
                 }),
                 18,
                 th,
@@ -950,6 +959,25 @@ mod tests {
             text.contains("mamba") && text.contains("free 2  evict 30"),
             "{text}"
         );
+    }
+
+    // The eviction-rate readout gains a per-pass mean cost (write_back
+    // passes block on the D->H copy). Family absent → no cost suffix.
+    #[test]
+    fn gone_row_carries_the_per_pass_cost() {
+        let mut s = Snapshot::default();
+        s.kv.evicted_total = Some(112_000_000);
+        s.kv.evicted_tps = Some(333.0);
+        s.kv.token_usage = 0.5;
+        s.kv.evict_pass_mean_secs = Some(0.0021);
+        let text = render_kv(&s, 52);
+        assert!(text.contains("gone"), "{text}");
+        assert!(text.contains("2ms"), "{text}");
+
+        s.kv.evict_pass_mean_secs = None;
+        let text = render_kv(&s, 52);
+        assert!(text.contains("gone"), "{text}");
+        assert!(!text.contains("ms"), "no fake cost suffix: {text}");
     }
 
     #[test]
