@@ -9,7 +9,9 @@ use ratatui::{
 
 use crate::model::snapshot::Snapshot;
 use crate::ui::frame;
-use crate::ui::panels::human::{human_count, human_duration, human_pct, human_rate, value_cell};
+use crate::ui::panels::human::{
+    human_count, human_duration, human_pct, human_rate, human_rate_frac, value_cell,
+};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::meter::meter_spans;
 
@@ -555,7 +557,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
 
     lines.push(Line::from(vec![
         Span::styled("req ", Style::default().fg(th.c("title")).bold()),
-        value_cell(Some(human_rate(s.traffic.req_rate_in)), 8, th, dim),
+        value_cell(Some(human_rate_frac(s.traffic.req_rate_in)), 8, th, dim),
         Span::styled("  total ", Style::default().fg(th.c("graph_text"))),
         value_cell(Some(human_count(s.traffic.total_requests)), 10, th, dim),
         Span::styled("  aborted ", Style::default().fg(th.c("graph_text"))),
@@ -573,7 +575,16 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
             "rps ",
             Style::default().fg(th.c("graph_text")),
         ));
-        row.push(value_cell(s.traffic.http_rps.map(human_rate), 7, th, dim));
+        // human_rate_frac: a quiet server's 0.9 req/s must not render as the
+        // integer 0 that human_rate's u64 cast gives — absence reads as zero
+        // traffic when it's actually a live trickle (the endpoint block in
+        // the `i` overlay shows the same rates with decimals).
+        row.push(value_cell(
+            s.traffic.http_rps.map(human_rate_frac),
+            7,
+            th,
+            dim,
+        ));
         row.push(Span::styled(
             " active ",
             Style::default().fg(th.c("graph_text")),
@@ -589,7 +600,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
             Style::default().fg(th.c("graph_text")),
         ));
         row.push(value_cell(
-            s.traffic.http_err_rate.map(human_rate),
+            s.traffic.http_err_rate.map(human_rate_frac),
             7,
             th,
             dim,

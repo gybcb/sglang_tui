@@ -374,22 +374,22 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
                 w += cw;
                 path.push(ch);
             }
-            // Fractional req/s, not human_rate: a health-check loop is a
-            // fraction of a request per second, and human_count's u64 cast
-            // would render every quiet route as an identical 0. One decimal
-            // below 100 keeps the column readable without false precision.
-            // A route with errors gets a ` err N` tail in the alarm colour —
-            // the aggregate err_rate can't say *which* route is failing, and a
-            // client hammering a wrong-method route otherwise reads as healthy.
+            // human_rate_frac: same decimal-low-QPS rule as the traffic
+            // panel's rps row. A route with errors gets a ` err N` tail in
+            // the alarm colour — the aggregate err_rate can't say *which*
+            // route is failing, and a client hammering a wrong-method route
+            // otherwise reads as healthy.
             let value = if e.err > 0 {
                 format!(
-                    "{rate:.1}/s  total {}  err {}",
+                    "{}/s  total {}  err {}",
+                    crate::ui::panels::human::human_rate_frac(rate),
                     crate::ui::panels::human::human_count(e.total),
                     crate::ui::panels::human::human_count(e.err),
                 )
             } else {
                 format!(
-                    "{rate:.1}/s  total {}",
+                    "{}/s  total {}",
+                    crate::ui::panels::human::human_rate_frac(rate),
                     crate::ui::panels::human::human_count(e.total),
                 )
             };

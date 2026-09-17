@@ -14,6 +14,18 @@ pub fn human_rate(v: f64) -> String {
     human_count(v as u64)
 }
 
+/// Requests/s where the fraction is the point: a health-check loop is 0.2/s,
+/// and human_rate's u64 cast renders every low-QPS reading as an identical
+/// `0` — a misleading zero. One decimal below 100, normal humanising above
+/// (a busy server's 3.5k rps doesn't need .1 of a request).
+pub fn human_rate_frac(v: f64) -> String {
+    if v < 100.0 {
+        format!("{v:.1}")
+    } else {
+        human_count(v as u64)
+    }
+}
+
 /// Counts → thousands/mega/giga with one decimal above 999.
 pub fn human_count(v: u64) -> String {
     const UNITS: [&str; 4] = ["", "k", "M", "G"];
@@ -109,5 +121,18 @@ mod tests {
     #[test]
     fn pct() {
         assert_eq!(human_pct(0.731), "73%");
+    }
+
+    #[test]
+    fn fractional_rates_keep_their_decimal() {
+        // The whole reason human_rate_frac exists: these must not all
+        // collapse to "0" the way human_rate's u64 cast does.
+        assert_eq!(human_rate_frac(0.0), "0.0");
+        assert_eq!(human_rate_frac(0.19), "0.2");
+        assert_eq!(human_rate_frac(0.9), "0.9");
+        assert_eq!(human_rate_frac(99.94), "99.9");
+        // Above 100, one decimal of a request is false precision — normal
+        // humanising takes over.
+        assert_eq!(human_rate_frac(3500.0), "3.50k");
     }
 }
