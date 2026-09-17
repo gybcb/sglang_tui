@@ -220,6 +220,23 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
         value_cell(s.kv.evictable_tokens.map(human_count), 10, th, dim),
     ]));
 
+    // GPU memory ledger (btop's MEM sub-rows analog): weights vs the KV pool
+    // vs captured graphs. There is no free-total here on purpose — these are
+    // the only three ledgers sglang accounts for; their sum is NOT the card's
+    // usage (activations, NCCL, fragmentation all live outside it).
+    if s.kv.weight_gb.is_some() || s.kv.kv_cache_gb.is_some() || s.kv.graph_gb.is_some() {
+        let gb = |v: Option<f64>| value_cell(v.map(|g| format!("{g:.1}G")), 7, th, dim);
+        lines.push(Line::from(vec![
+            Span::styled("mem ", Style::default().fg(th.c("title")).bold()),
+            Span::styled("w ", Style::default().fg(th.c("graph_text"))),
+            gb(s.kv.weight_gb),
+            Span::styled(" kv ", Style::default().fg(th.c("graph_text"))),
+            gb(s.kv.kv_cache_gb),
+            Span::styled(" graph ", Style::default().fg(th.c("graph_text"))),
+            gb(s.kv.graph_gb),
+        ]));
+    }
+
     // `hit cur/peak` over the visible window — the rate is an instantaneous
     // scheduler gauge that reads 0 while idle, so the window peak plus the
     // history graph below is what actually shows cache behaviour.
@@ -949,5 +966,33 @@ mod tests {
         assert!(text.contains("d 1.00k") && text.contains("h 500"), "{text}");
         // Share spans every tier: (1000+500)/2000 = 75%, not 50%.
         assert!(text.contains("75%"), "{text}");
+    }
+
+    // The GPU memory ledger appears only once sglang reports the ledgers, and
+    // renders each independently (a server without graph capture shows w/kv).
+    #[test]
+    fn mem_ledger_row_renders_present_ledgers() {
+        let mut s = Snapshot::default();
+        s.kv.weight_gb = Some(81.45);
+        s.kv.kv_cache_gb = Some(5.93);
+        s.kv.graph_gb = None; // no graph memory reported
+        let text = render_kv(&s, 40);
+        assert!(text.contains("mem "), "{text}");
+        assert!(text.contains("81.5G") && text.contains("5.9G"), "{text}");
+        // An absent ledger's slot renders N/A, not a false 0. (Check the
+        // window right after the graph label — N/A also rides the available
+        // row on an empty snapshot, so a bare contains would pass anyway.)
+        let g = text.find("graph").expect("graph label present");
+        assert!(
+            text[g..g + 14].contains("N/A"),
+            "graph ledger absent → N/A: {text}"
+        );
+
+        // No ledgers at all → the whole row is hidden, not three N/A cells.
+        let bare = render_kv(&Snapshot::default(), 40);
+        assert!(
+            !bare.contains("mem "),
+            "row hidden when families absent: {bare}"
+        );
     }
 }

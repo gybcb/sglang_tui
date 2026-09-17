@@ -179,7 +179,6 @@ impl Default for EnginePanel {
 pub struct KvPanel {
     pub used_tokens: u64,
     pub total_tokens: u64,
-    pub active_tokens: u64,
     /// The bottleneck ratio (0..1). "misleadingly named" at source — surface
     /// the sub-pool ratios alongside and title the bar "token pool".
     pub token_usage: f64,
@@ -231,7 +230,6 @@ impl Default for KvPanel {
         KvPanel {
             used_tokens: 0,
             total_tokens: 0,
-            active_tokens: 0,
             token_usage: 0.0,
             full_token_usage: None,
             swa_token_usage: None,
