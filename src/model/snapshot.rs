@@ -154,6 +154,11 @@ pub struct EnginePanel {
     /// detector: graphs off (batch shape escaped capture, flag off) and
     /// decode throughput drops with no error anywhere. None = family absent.
     pub cg_decode_share: Option<f64>,
+    /// Sum of all sequence lengths currently in decode
+    /// (`decode_sum_seq_lens`). Against `running_reqs` it's the mean context
+    /// each active sequence carries — the answer to "only 2 requests and the
+    /// pool is 46% full". None = family absent (older server).
+    pub decode_ctx_sum: Option<f64>,
     /// Scheduler admission-pressure dial (`new_token_ratio`): the estimated
     /// remaining-tokens fraction used to admit new requests. It decays as the
     /// pool tightens — low alongside high token-usage means the scheduler is
@@ -177,6 +182,7 @@ impl Default for EnginePanel {
             tokenizer_cores: None,
             detokenizer_cores: None,
             cg_decode_share: None,
+            decode_ctx_sum: None,
             new_token_ratio: None,
         }
     }

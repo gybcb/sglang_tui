@@ -85,6 +85,17 @@ pub fn engine(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) 
         Span::styled("  waiting ", Style::default().fg(th.c("title")).bold()),
         value_cell(Some(human_count(s.engine.waiting_reqs)), 8, th, dim),
     ];
+    // Mean context carried per decode-phase sequence — why two running
+    // requests can occupy a 46%-full pool. Hidden while idle: an average
+    // over zero sequences is meaningless, not zero.
+    if let (Some(sum), true) = (s.engine.decode_ctx_sum, s.engine.running_reqs > 0) {
+        let avg = sum / s.engine.running_reqs as f64;
+        row3.push(Span::styled(
+            "  ctx ",
+            Style::default().fg(th.c("title")).bold(),
+        ));
+        row3.push(value_cell(Some(human_count(avg as u64)), 8, th, dim));
+    }
     // Helper-process CPU (cores in use right now): the tokenizer is the
     // classic hidden bottleneck — when it saturates, GPU goes idle upstream.
     if s.engine.tokenizer_cores.is_some() || s.engine.detokenizer_cores.is_some() {
@@ -978,6 +989,28 @@ mod tests {
         let text = render_kv(&s, 52);
         assert!(text.contains("gone"), "{text}");
         assert!(!text.contains("ms"), "no fake cost suffix: {text}");
+    }
+
+    // Mean decode context appears only with sequences to average over —
+    // idle (running=0) hides the column rather than dividing by zero or
+    // showing a meaningless 0.
+    #[test]
+    fn ctx_column_needs_running_sequences() {
+        let mut s = Snapshot::default();
+        s.engine.running_reqs = 2;
+        s.engine.decode_ctx_sum = Some(147728.0);
+        let text = render_engine(&s);
+        assert!(text.contains("ctx") && text.contains("73.9k"), "{text}");
+
+        s.engine.running_reqs = 0;
+        let idle = render_engine(&s);
+        assert!(!idle.contains("ctx"), "idle has no average: {idle}");
+
+        // Family absent on an old server: no column even while busy.
+        let mut s2 = Snapshot::default();
+        s2.engine.running_reqs = 3;
+        let none = render_engine(&s2);
+        assert!(!none.contains("ctx"), "{none}");
     }
 
     #[test]

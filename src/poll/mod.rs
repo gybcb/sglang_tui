@@ -247,6 +247,21 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         .push(s.engine.decode_tps.unwrap_or(0.0));
     s.engine.utilization = first_val("sglang:utilization");
     s.engine.fwd_occupancy = first_val("sglang:fwd_occupancy");
+    // Decode-phase context sum: rank-scoped series each carry their own
+    // share, so sum; all-NaN or absent → None (hidden), never a fabricated
+    // context size from summing nothing.
+    {
+        let d: Vec<f64> = m
+            .get("sglang:decode_sum_seq_lens")
+            .map(|x| x.value)
+            .filter(|v| !v.is_nan())
+            .collect();
+        s.engine.decode_ctx_sum = if d.is_empty() {
+            None
+        } else {
+            Some(d.iter().sum())
+        };
+    }
     // Queue totals: sum the per-scheduler rank-scoped series; fall back to the
     // aggregate-only series when ranks aren't attributed (sum_across_ranks).
     s.engine.running_reqs = sum_across_ranks(m, "sglang:num_running_reqs", true).max(0.0) as u64;
@@ -1068,6 +1083,26 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert_eq!(s.kv.swa_available, Some(0), "zero free is a fact");
         assert_eq!(s.kv.mamba_available, Some(2));
         assert_eq!(s.kv.mamba_evictable, Some(30));
+    }
+
+    #[test]
+    fn decode_ctx_sum_sums_ranks_and_respects_absence() {
+        // Absent family (base FIXTURE) → None.
+        assert!(two_builds(0).engine.decode_ctx_sum.is_none());
+
+        let f = format!(
+            "{FIXTURE}\nsglang:decode_sum_seq_lens{{engine_type=\"unified\",tp_rank=\"0\",dp_rank=\"0\"}} 1000\nsglang:decode_sum_seq_lens{{engine_type=\"unified\",tp_rank=\"0\",dp_rank=\"1\"}} 250\n"
+        );
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(
+            &prom::parse(&f),
+            &mut st,
+            Instant::now(),
+            Duration::ZERO,
+            &mut s,
+        );
+        assert_eq!(s.engine.decode_ctx_sum, Some(1250.0));
     }
 
     #[test]
