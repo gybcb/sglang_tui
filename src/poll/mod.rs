@@ -384,6 +384,19 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             sum_if_present(m, "sglang:backuped_tokens_total").map(|v| v as u64);
         hicache.storage_prefetched_total =
             sum_if_present(m, "sglang:prefetched_tokens_total").map(|v| v as u64);
+        // Per-op copy latency, exact from sum/count (no bucket interpolation).
+        // Zero count → None: "no copies yet" is not "copies are instant".
+        let hist_mean = |fam: &str| -> Option<f64> {
+            let count = sum_across_ranks(m, &format!("{fam}_count"), false);
+            let sum = sum_across_ranks(m, &format!("{fam}_sum"), false);
+            if count > 0.0 && sum.is_finite() && count.is_finite() {
+                Some(sum / count)
+            } else {
+                None
+            }
+        };
+        hicache.backup_mean_secs = hist_mean("sglang:hicache_backup_duration_seconds");
+        hicache.load_back_mean_secs = hist_mean("sglang:load_back_duration_seconds");
     }
 
     // --- TRAFFIC (NET triple × two directions) ---
@@ -978,7 +991,7 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert!(s.kv.hicache.is_none(), "no hicache metrics → None");
 
         let with_hc = format!(
-            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\nsglang:hicache_backup_tokens_total{{pool=\"kv\"}} 900\nsglang:hicache_dropped_tokens_total{{pool=\"kv\",reason=\"host_pressure\"}} 5\nsglang:load_back_tokens_total{{pool=\"kv\"}} 120\nsglang:hicache_prefetch_aux_alloc_failed_tokens_total{{storage_backend=\"nixl\"}} 30\nsglang:backuped_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 800\nsglang:prefetched_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 10\n"
+            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\nsglang:hicache_backup_tokens_total{{pool=\"kv\"}} 900\nsglang:hicache_dropped_tokens_total{{pool=\"kv\",reason=\"host_pressure\"}} 5\nsglang:load_back_tokens_total{{pool=\"kv\"}} 120\nsglang:hicache_prefetch_aux_alloc_failed_tokens_total{{storage_backend=\"nixl\"}} 30\nsglang:backuped_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 800\nsglang:prefetched_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 10\nsglang:hicache_backup_duration_seconds_sum{{cache_type=\"UnifiedRadixCache\"}} 20\nsglang:hicache_backup_duration_seconds_count{{cache_type=\"UnifiedRadixCache\"}} 100\nsglang:load_back_duration_seconds_sum{{cache_type=\"UnifiedRadixCache\"}} 5\nsglang:load_back_duration_seconds_count{{cache_type=\"UnifiedRadixCache\"}} 10\n"
         );
         let mut s2 = Snapshot::default();
         build(
@@ -997,6 +1010,28 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         // L3 round trip (distinct from the device→host hicache_backup family).
         assert_eq!(hc.storage_backuped_total, Some(800));
         assert_eq!(hc.storage_prefetched_total, Some(10));
+        // Per-op copy latency from histogram sum/count (exact, no buckets).
+        assert_eq!(hc.backup_mean_secs, Some(0.2));
+        assert_eq!(hc.load_back_mean_secs, Some(0.5));
+
+        // hicache present but the duration histograms absent (older build) →
+        // None, so the UI drops the latency half instead of claiming 0s.
+        let no_hist = with_hc
+            .lines()
+            .filter(|l| !l.contains("duration_seconds"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut s3 = Snapshot::default();
+        build(
+            &prom::parse(&no_hist),
+            &mut st,
+            Instant::now(),
+            Duration::ZERO,
+            &mut s3,
+        );
+        let hc3 = s3.kv.hicache.expect("hicache still present");
+        assert_eq!(hc3.backup_mean_secs, None);
+        assert_eq!(hc3.load_back_mean_secs, None);
     }
 
     #[test]

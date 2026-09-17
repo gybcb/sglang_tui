@@ -357,8 +357,18 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
             // silently, so drop the least-important column until the row fits
             // the interior — `fail` must survive even in narrow layouts.
             let avail = rect.width.saturating_sub(2) as usize; // interior width
+            // Mean per-op copy time is the speed half of the story: counts say
+            // how much moved, the duration says whether the copies got slower
+            // (bandwidth saturation is silent in every counter).
+            let with_mean = |count: u64, mean: Option<f64>| match mean {
+                Some(secs) => format!("{} {}", human_count(count), human_duration(secs)),
+                None => human_count(count),
+            };
             let mut cols: Vec<(String, Style)> = vec![(
-                format!("backup {}", human_count(hc.backuped_total.unwrap_or(0))),
+                format!(
+                    "backup {}",
+                    with_mean(hc.backuped_total.unwrap_or(0), hc.backup_mean_secs)
+                ),
                 Style::default().fg(th.c("graph_text")),
             )];
             cols.push((
@@ -371,7 +381,7 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
             ));
             if let Some(rb) = hc.load_back_total {
                 cols.push((
-                    format!("back {rb}", rb = human_count(rb)),
+                    format!("back {}", with_mean(rb, hc.load_back_mean_secs)),
                     Style::default().fg(th.c("graph_text")),
                 ));
             }
@@ -833,6 +843,8 @@ mod tests {
             prefetch_failed_total: Some(48_800),
             storage_backuped_total: None,
             storage_prefetched_total: None,
+            backup_mean_secs: None,
+            load_back_mean_secs: None,
         };
         Snapshot {
             kv: crate::model::snapshot::KvPanel {
@@ -883,6 +895,27 @@ mod tests {
         assert!(text.contains("1.08M"), "prefetch side: {text}");
         // Reuse share 1.08M/82.5M ≈ 1%.
         assert!(text.contains("1%"), "reuse share: {text}");
+    }
+
+    // The per-op copy latency rides on the backup/back counts: bandwidth
+    // saturation is invisible in counters — the mean copy time creeping up is
+    // the only sign. Absent means render no latency (not a false "0ms").
+    #[test]
+    fn hicache_copy_latency_rides_the_counts() {
+        let mut s = snap_hicache();
+        let hc = s.kv.hicache.as_mut().unwrap();
+        hc.backup_mean_secs = Some(0.0214);
+        hc.load_back_mean_secs = Some(0.5);
+        let text = render_kv(&s, 70);
+        assert!(text.contains("backup 72.5M 21ms"), "{text}");
+        assert!(text.contains("back 11.1M 500ms"), "{text}");
+
+        // Baseline snapshot has no means → counts render alone.
+        let bare = render_kv(&snap_hicache(), 70);
+        assert!(
+            bare.contains("backup 72.5M") && !bare.contains("21ms"),
+            "{bare}"
+        );
     }
 
     fn snap_with_latency(set: LatencySet) -> Snapshot {

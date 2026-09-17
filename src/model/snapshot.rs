@@ -227,6 +227,14 @@ pub struct HiCache {
     /// Host→GPU reloads (`load_back_tokens_total`): backed-up tokens that
     /// were actually reused. None = counter absent.
     pub load_back_total: Option<u64>,
+    /// Mean per-op duration of the two L2 copies (histogram sum/count):
+    /// device→host backup (`hicache_backup_duration_seconds`) and host→GPU
+    /// reload (`load_back_duration_seconds`). Counts alone hide the silent
+    /// degradation — PCIe/host-memory bandwidth saturation shows up here as
+    /// creeping latency while every counter keeps ticking. None = family
+    /// absent or no ops yet.
+    pub backup_mean_secs: Option<f64>,
+    pub load_back_mean_secs: Option<f64>,
     /// Storage-tier prefetch tokens that failed aux-pool allocation on arrival
     /// (`hicache_prefetch_aux_alloc_failed_tokens_total`) — fetched data
     /// thrown away because mamba/aux pools were full. None = counter absent.
