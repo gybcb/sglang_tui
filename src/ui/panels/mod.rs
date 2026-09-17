@@ -727,6 +727,11 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
         ]));
     }
 
+    // Request-stage breakdown lives in the server-info overlay (`i`), not
+    // here: the traffic panel's nine interior rows already fight for slots,
+    // and a stage row evicted the ttft percentile row — the headline latency
+    // metric outranks the where-did-it-go detail. The overlay has the room.
+
     // Latency percentiles — one row per family the server actually exposes
     // (`known`), so a renamed metric drops its row rather than the panel.
     // Values are N/A until the 30s window holds a first histogram delta.
@@ -833,12 +838,16 @@ mod tests {
     use crate::ui::theme::{ColorMode, Theme};
 
     fn render_traffic(s: &Snapshot) -> String {
+        render_traffic_w(s, 60)
+    }
+
+    fn render_traffic_w(s: &Snapshot, w: u16) -> String {
         let th = Theme::builtin("Default", ColorMode::TrueColor);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 20));
-        traffic(s, &th, Gui::MODERN, Rect::new(0, 0, 60, 20), &mut buf);
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, 20));
+        traffic(s, &th, Gui::MODERN, Rect::new(0, 0, w, 20), &mut buf);
         let b = &buf;
         (0..20)
-            .flat_map(|y| (0..60).map(move |x| b[(x, y)].symbol().to_owned()))
+            .flat_map(|y| (0..w).map(move |x| b[(x, y)].symbol().to_owned()))
             .collect()
     }
 

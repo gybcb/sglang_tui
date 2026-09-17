@@ -334,6 +334,12 @@ pub struct TrafficPanel {
     /// what prefill actually processes after cache hits. Against avg_prompt_len
     /// it turns the cache ratio into per-request work saved.
     pub avg_uncached_len: Option<f64>,
+    /// Request-lifecycle stage latencies (per_stage_req_latency_seconds):
+    /// (stage, mean secs) sorted slowest-first. The percentile rows answer
+    /// "how long end to end"; these answer "where did it go" (request
+    /// handling vs prefill forward vs a chunk) — and the stage set is
+    /// server-defined, so it is read, never hardcoded. Empty = family absent.
+    pub stage_means: Vec<(String, f64)>,
     // queue breakdown — btop's per-direction rows
     pub req_rate_in: f64,
     pub req_rate_out: f64,
@@ -399,6 +405,7 @@ impl Default for TrafficPanel {
             avg_prompt_len: None,
             avg_gen_len: None,
             avg_uncached_len: None,
+            stage_means: Vec::new(),
             req_rate_in: 0.0,
             req_rate_out: 0.0,
             total_requests: 0,

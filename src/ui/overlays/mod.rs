@@ -96,9 +96,26 @@ pub fn render(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    // Panel sized to the larger content, capped inside the area.
+    // Panel sized to the larger content, capped inside the area. Built body
+    // first so the height fits what's actually shown: startup timelines and
+    // stage breakdowns are server-dependent and used to clip at 26 rows.
+    let mut body: Vec<Line<'static>> = match which {
+        Overlay::Help => help_lines(th),
+        Overlay::Options => options_lines(cfg, live.paused, live.interval_ms, th),
+        Overlay::ServerInfo => server_lines(cfg, snap, th),
+    };
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        "any key: back",
+        Style::default()
+            .fg(th.c("inactive_fg"))
+            .add_modifier(Modifier::ITALIC),
+    )));
+
     let w = 66u16.min(area.width.saturating_sub(2));
-    let h = 26u16.min(area.height.saturating_sub(2));
+    let h = 26u16
+        .max(body.len() as u16 + 2)
+        .min(area.height.saturating_sub(2));
     if w < 20 || h < 6 {
         return;
     }
@@ -116,19 +133,6 @@ pub fn render(
         .style(Style::default().fg(th.c("main_fg")));
     let inner = block.inner(rect);
     block.render(rect, buf);
-
-    let mut body: Vec<Line<'static>> = match which {
-        Overlay::Help => help_lines(th),
-        Overlay::Options => options_lines(cfg, live.paused, live.interval_ms, th),
-        Overlay::ServerInfo => server_lines(cfg, snap, th),
-    };
-    body.push(Line::from(""));
-    body.push(Line::from(Span::styled(
-        "any key: back",
-        Style::default()
-            .fg(th.c("inactive_fg"))
-            .add_modifier(Modifier::ITALIC),
-    )));
 
     Paragraph::new(body).render(inner, buf);
 }
@@ -279,6 +283,24 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             v.push(wide_row("free gpu @boot", &format!("{free:.1} GB"), th));
         }
     }
+    // Request-lifecycle stages: where a served request spends its time,
+    // slowest first. Same shape as the startup block (phase → seconds, read
+    // from the server, never hardcoded) and the same rationale for living
+    // here — it's diagnostic detail, and the traffic panel has no spare row.
+    if !snap.traffic.stage_means.is_empty() {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "request stages",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        for (stage, secs) in &snap.traffic.stage_means {
+            v.push(wide_row(
+                stage,
+                &crate::ui::panels::human::human_duration(*secs),
+                th,
+            ));
+        }
+    }
     if !s.loaded {
         v.push(Line::from(Span::styled(
             "metadata not yet fetched (auth-gated /server_info)",
@@ -388,5 +410,36 @@ mod tests {
             30,
         );
         assert!(text.contains("Qwen3.8-Flash-Next"), "{text}");
+    }
+
+    // The stage breakdown needs more rows than the base 26 — the panel
+    // grows to fit its body (this used to clip silently).
+    #[test]
+    fn server_info_lists_request_stages() {
+        let mut snap = Snapshot::default();
+        snap.server.loaded = true;
+        snap.traffic.stage_means = vec![
+            ("prefill_forward".into(), 0.374),
+            ("chunked_prefill".into(), 0.319),
+            ("request_process".into(), 0.0002),
+        ];
+        let text = render_overlay(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &snap,
+            false,
+            1000,
+            80,
+            40,
+        );
+        assert!(text.contains("request stages"), "{text}");
+        assert!(
+            text.contains("prefill_forward") && text.contains("374ms"),
+            "{text}"
+        );
+        assert!(
+            text.contains("request_process") && text.contains("0ms"),
+            "{text}"
+        );
     }
 }

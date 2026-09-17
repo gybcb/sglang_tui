@@ -625,6 +625,38 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         s.traffic.avg_uncached_len = mean("sglang:uncached_prompt_tokens_histogram");
     }
 
+    // --- request-stage latency breakdown (per_stage_req_latency_seconds) ----
+    // Stage names are server-defined (this build: request_process,
+    // prefill_forward, chunked_prefill) — read them from the scrape, never
+    // hardcode. Per stage, sum/count over its series (multi-rank sums both
+    // numerator and denominator, so the mean stays exact). Slowest stage
+    // first: the answer to "where did the time go" leads.
+    {
+        let mut stages: Vec<(String, f64)> = Vec::new();
+        let mut names: Vec<String> = m
+            .get("sglang:per_stage_req_latency_seconds_sum")
+            .filter_map(|x| x.label("stage").map(|s| s.to_string()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        for stage in names {
+            let sel = |fam: &str| {
+                m.get(fam)
+                    .filter(|x| x.label("stage") == Some(stage.as_str()))
+                    .filter(|x| x.value.is_finite())
+                    .map(|x| x.value)
+                    .sum::<f64>()
+            };
+            let count = sel("sglang:per_stage_req_latency_seconds_count");
+            let sum = sel("sglang:per_stage_req_latency_seconds_sum");
+            if count > 0.0 {
+                stages.push((stage, sum / count));
+            }
+        }
+        stages.sort_by(|a, b| b.1.total_cmp(&a.1));
+        s.traffic.stage_means = stages;
+    }
+
     // --- RANKS ---
     build_ranks(m, now, s);
 
@@ -1109,6 +1141,49 @@ sglang:hicache_backup_duration_seconds_count{cache_type="kv"} 10
         let hc = s.kv.hicache.as_ref().unwrap();
         // bytes rate 2000/s over transfer-time rate 1.0/s = 2000 B/s.
         assert_eq!(hc.backup_gbps, Some(2000.0));
+    }
+
+    // The stage breakdown reads stage names from the scrape (server-defined)
+    // and sorts slowest-first — "where did the time go" leads with the
+    // bottleneck. Zero-count stages are dropped; absent family → empty.
+    #[test]
+    fn stage_means_read_names_and_sort_slowest_first() {
+        const STAGES: &str = r#"
+sglang:per_stage_req_latency_seconds_sum{stage="request_process"} 1.0
+sglang:per_stage_req_latency_seconds_count{stage="request_process"} 10
+sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"} 7600.0
+sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"} 200
+sglang:per_stage_req_latency_seconds_sum{stage="chunked_prefill"} 300.0
+sglang:per_stage_req_latency_seconds_count{stage="chunked_prefill"} 100
+sglang:per_stage_req_latency_seconds_sum{stage="never_counted"} 5.0
+sglang:per_stage_req_latency_seconds_count{stage="never_counted"} 0
+"#;
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(
+            &prom::parse(STAGES),
+            &mut st,
+            Instant::now(),
+            Duration::ZERO,
+            &mut s,
+        );
+        let m = &s.traffic.stage_means;
+        assert_eq!(m.len(), 3, "zero-count stage dropped: {m:?}");
+        assert_eq!(m[0].0, "prefill_forward", "bottleneck first: {m:?}");
+        assert!((m[0].1 - 38.0).abs() < 1e-9);
+        assert_eq!(m[1].0, "chunked_prefill");
+        assert_eq!(m[2].0, "request_process");
+
+        // Family absent → empty vec (row hidden), not a row of N/A.
+        let mut s2 = Snapshot::default();
+        build(
+            &prom::parse(FIXTURE),
+            &mut st,
+            Instant::now(),
+            Duration::ZERO,
+            &mut s2,
+        );
+        assert!(s2.traffic.stage_means.is_empty());
     }
 
     #[test]
