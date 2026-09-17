@@ -199,6 +199,13 @@ pub struct KvPanel {
     /// absent (non-hybrid model) → no absolute shown.
     pub swa_used: Option<u64>,
     pub mamba_used: Option<u64>,
+    /// Truly-free slots per sub-pool — the ratio's missing half. A pool can
+    /// read 20% used while nearly all its headroom is radix cache that must
+    /// be evicted (recomputed) before reuse; `used`+ratio hides that, the
+    /// free count says the pool is one allocation from churn. None = family
+    /// absent → suffix hidden.
+    pub swa_available: Option<u64>,
+    pub mamba_available: Option<u64>,
     pub available_tokens: Option<u64>,
     pub evictable_tokens: Option<u64>,
     /// Lifetime tokens evicted from the device pool (`evicted_tokens_total`);
@@ -267,6 +274,8 @@ impl Default for KvPanel {
             mamba_usage: None,
             swa_used: None,
             mamba_used: None,
+            swa_available: None,
+            mamba_available: None,
             available_tokens: None,
             evictable_tokens: None,
             evicted_total: None,

@@ -285,6 +285,8 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     s.kv.mamba_usage = first_val("sglang:mamba_usage");
     s.kv.swa_used = sum_if_present(m, "sglang:swa_used_tokens").map(|v| v as u64);
     s.kv.mamba_used = sum_if_present(m, "sglang:mamba_used_tokens").map(|v| v as u64);
+    s.kv.swa_available = sum_if_present(m, "sglang:swa_available_tokens").map(|v| v as u64);
+    s.kv.mamba_available = sum_if_present(m, "sglang:mamba_available_tokens").map(|v| v as u64);
     s.kv.available_tokens = sum_if_present(m, "sglang:kv_available_tokens").map(|v| v as u64);
     s.kv.evictable_tokens = sum_if_present(m, "sglang:kv_evictable_tokens").map(|v| v as u64);
     // Lifetime eviction pressure: how many device slots have *ever* been
@@ -1019,6 +1021,37 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         build(&m, &mut st, Instant::now(), Duration::ZERO, &mut s);
         assert!(s.engine.utilization.is_none(), "NaN utilization -> N/A");
         assert_eq!(s.engine.gen_throughput, 50.0);
+    }
+
+    #[test]
+    fn subpool_free_slots_read_only_when_family_present() {
+        // Non-hybrid model: the free-slot gauges don't exist → hidden, not 0.
+        let s = two_builds(0);
+        assert!(s.kv.swa_available.is_none());
+        assert!(s.kv.mamba_available.is_none());
+
+        let hyb = FIXTURE
+            .replace(
+                "sglang:token_usage{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\",dp_rank=\"1\"} 0.05",
+                "sglang:token_usage{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\",dp_rank=\"1\"} 0.05\n\
+                 sglang:swa_token_usage{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 0.0\n\
+                 sglang:swa_used_tokens{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 0\n\
+                 sglang:swa_available_tokens{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 0\n\
+                 sglang:mamba_usage{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 0.2\n\
+                 sglang:mamba_used_tokens{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 8\n\
+                 sglang:mamba_available_tokens{model_name=\"qwen\",engine_type=\"unified\",tp_rank=\"0\",pp_rank=\"0\",moe_ep_rank=\"0\"} 2",
+            );
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(
+            &prom::parse(&hyb),
+            &mut st,
+            Instant::now(),
+            Duration::ZERO,
+            &mut s,
+        );
+        assert_eq!(s.kv.swa_available, Some(0), "zero free is a fact");
+        assert_eq!(s.kv.mamba_available, Some(2));
     }
 
     #[test]

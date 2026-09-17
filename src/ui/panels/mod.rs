@@ -279,10 +279,20 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
     }
 
     // Sub-pool ratios appear only when this model has those pools.
-    for (label, v, used) in [
-        ("full", s.kv.full_token_usage, None),
-        ("swa", s.kv.swa_token_usage, s.kv.swa_used),
-        ("mamba", s.kv.mamba_usage, s.kv.mamba_used),
+    for (label, v, used, avail) in [
+        ("full", s.kv.full_token_usage, None, None),
+        (
+            "swa",
+            s.kv.swa_token_usage,
+            s.kv.swa_used,
+            s.kv.swa_available,
+        ),
+        (
+            "mamba",
+            s.kv.mamba_usage,
+            s.kv.mamba_used,
+            s.kv.mamba_available,
+        ),
     ] {
         if let Some(v) = v {
             let mut row = vec![Span::styled(
@@ -301,6 +311,20 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
                 row.push(Span::styled(
                     format!("  {u}"),
                     Style::default().fg(th.c("graph_text")),
+                ));
+            }
+            // The ratio's other half: headroom the ratio counts as free but
+            // that's actually radix cache — evictable only by recomputing.
+            // free=0 beside a low ratio is the churn tell: the next
+            // allocation evicts no matter how roomy the bar looks.
+            if let Some(a) = avail {
+                row.push(Span::styled(
+                    format!("  free {a}"),
+                    Style::default().fg(if a == 0 {
+                        th.c("hi_fg")
+                    } else {
+                        th.c("graph_text")
+                    }),
                 ));
             }
             lines.push(Line::from(row));
@@ -885,6 +909,28 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    // The sub-pool free-slot count is the ratio's missing half: a pool can
+    // read a low ratio yet have zero truly-free slots (all headroom is radix
+    // cache). free appears only when the gauge exists; a family-absent model
+    // shows no `free` (not a false `free 0`).
+    #[test]
+    fn subpool_free_count_follows_family_presence() {
+        // Default snapshot: hybrid gauges absent → no `free` text at all.
+        let baseline = render_kv(&Snapshot::default(), 44);
+        assert!(!baseline.contains("free"), "{baseline}");
+
+        let mut s = Snapshot::default();
+        s.kv.swa_token_usage = Some(0.0);
+        s.kv.swa_used = Some(0);
+        s.kv.swa_available = Some(0);
+        s.kv.mamba_usage = Some(0.2);
+        s.kv.mamba_used = Some(8);
+        s.kv.mamba_available = Some(2);
+        let text = render_kv(&s, 44);
+        assert!(text.contains("swa") && text.contains("free 0"), "{text}");
+        assert!(text.contains("mamba") && text.contains("free 2"), "{text}");
     }
 
     #[test]
