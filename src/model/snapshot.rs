@@ -235,6 +235,13 @@ pub struct HiCache {
     /// absent or no ops yet.
     pub backup_mean_secs: Option<f64>,
     pub load_back_mean_secs: Option<f64>,
+    /// Achieved copy bandwidth (bytes/s) while transferring: sglang's own
+    /// recipe — rate(`hicache_backup_bytes_total`) / rate of the duration
+    /// histogram's sum. Strictly sharper than the per-op mean (which confuses
+    /// big ops with a slow link). None = no transfer in the rate window (the
+    /// UI then falls back to the per-op mean) or the family is absent.
+    pub backup_gbps: Option<f64>,
+    pub load_back_gbps: Option<f64>,
     /// Storage-tier prefetch tokens that failed aux-pool allocation on arrival
     /// (`hicache_prefetch_aux_alloc_failed_tokens_total`) — fetched data
     /// thrown away because mamba/aux pools were full. None = counter absent.

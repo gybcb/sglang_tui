@@ -397,6 +397,42 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         };
         hicache.backup_mean_secs = hist_mean("sglang:hicache_backup_duration_seconds");
         hicache.load_back_mean_secs = hist_mean("sglang:load_back_duration_seconds");
+        // Achieved bandwidth, sglang's own recipe (in the bytes counter's
+        // HELP): rate(bytes_total) / rate(duration_seconds_sum). The
+        // denominator is transfer-seconds, so this is the speed *while
+        // transferring* — strictly sharper than the per-op mean, which
+        // can't tell big ops from a slow link. Idle window → rate None →
+        // the UI falls back to the per-op mean.
+        let mut bw = |bytes_fam: &str, dur_fam: &str| -> Option<f64> {
+            let pts = |fam: &str| -> Vec<(String, f64)> {
+                m.get(fam)
+                    .filter(|x| !x.value.is_nan())
+                    .map(|x| (x.key(), x.value))
+                    .collect()
+            };
+            let b = pts(bytes_fam);
+            let d = pts(dur_fam);
+            if b.is_empty() || d.is_empty() {
+                return None;
+            }
+            // Record both series before testing either: an early `?` on the
+            // first scrape would skip recording the denominator's baseline
+            // entirely, leaving the ratio permanently one scrape short.
+            let b_rate = rates.rate_sum(now, b.iter().map(|(k, v)| (k.as_str(), *v)));
+            let d_rate = rates.rate_sum(now, d.iter().map(|(k, v)| (k.as_str(), *v)));
+            match (b_rate, d_rate) {
+                (Some(b), Some(d)) if d > 0.0 => Some(b / d),
+                _ => None,
+            }
+        };
+        hicache.backup_gbps = bw(
+            "sglang:hicache_backup_bytes_total",
+            "sglang:hicache_backup_duration_seconds_sum",
+        );
+        hicache.load_back_gbps = bw(
+            "sglang:load_back_bytes_total",
+            "sglang:load_back_duration_seconds_sum",
+        );
     }
 
     // --- TRAFFIC (NET triple × two directions) ---
@@ -1032,6 +1068,47 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         let hc3 = s3.kv.hicache.expect("hicache still present");
         assert_eq!(hc3.backup_mean_secs, None);
         assert_eq!(hc3.load_back_mean_secs, None);
+        assert_eq!(hc3.backup_gbps, None, "no duration family → no bw");
+    }
+
+    // Achieved bandwidth is a windowed ratio: rate(bytes) / rate(duration
+    // sum). Both counters grow together only while copies run, so the
+    // denominator is transfer-seconds and the result is the speed *while
+    // transferring* — sglang's own recipe from the bytes counter's HELP.
+    #[test]
+    fn hicache_bandwidth_is_bytes_over_transfer_time() {
+        const H: &str = r#"
+sglang:hicache_host_total_tokens{dp_rank="0"} 1000
+sglang:hicache_backup_bytes_total{cache_type="kv"} 1000
+sglang:hicache_backup_duration_seconds_sum{cache_type="kv"} 1
+sglang:hicache_backup_duration_seconds_count{cache_type="kv"} 10
+"#;
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(&prom::parse(H), &mut st, t0, Duration::ZERO, &mut s);
+        // First scrape: no rate baseline → bandwidth unknown, not 0.
+        assert_eq!(s.kv.hicache.as_ref().unwrap().backup_gbps, None);
+
+        let h2 = H
+            .replace(
+                "bytes_total{cache_type=\"kv\"} 1000",
+                "bytes_total{cache_type=\"kv\"} 5000",
+            )
+            .replace(
+                "duration_seconds_sum{cache_type=\"kv\"} 1",
+                "duration_seconds_sum{cache_type=\"kv\"} 3",
+            );
+        build(
+            &prom::parse(&h2),
+            &mut st,
+            t0 + Duration::from_secs(2),
+            Duration::ZERO,
+            &mut s,
+        );
+        let hc = s.kv.hicache.as_ref().unwrap();
+        // bytes rate 2000/s over transfer-time rate 1.0/s = 2000 B/s.
+        assert_eq!(hc.backup_gbps, Some(2000.0));
     }
 
     #[test]

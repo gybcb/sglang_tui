@@ -357,17 +357,35 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
             // silently, so drop the least-important column until the row fits
             // the interior — `fail` must survive even in narrow layouts.
             let avail = rect.width.saturating_sub(2) as usize; // interior width
-            // Mean per-op copy time is the speed half of the story: counts say
-            // how much moved, the duration says whether the copies got slower
-            // (bandwidth saturation is silent in every counter).
-            let with_mean = |count: u64, mean: Option<f64>| match mean {
-                Some(secs) => format!("{} {}", human_count(count), human_duration(secs)),
+            // Speed slot: achieved bandwidth (bytes/s *while transferring*)
+            // when a copy ran in the rate window — sglang's own recipe — else
+            // the cumulative per-op mean. The live number reads first; the
+            // mean is the fallback that still says something while idle.
+            let speed = |gbps: Option<f64>, mean: Option<f64>| match (gbps, mean) {
+                (Some(g), _) if g > 0.0 => {
+                    let (v, unit) = if g >= 1e9 {
+                        (g / 1e9, "GB/s")
+                    } else if g >= 1e6 {
+                        (g / 1e6, "MB/s")
+                    } else {
+                        (g, "B/s")
+                    };
+                    Some(format!("{:.1}{unit}", v))
+                }
+                (_, Some(secs)) => Some(human_duration(secs)),
+                _ => None,
+            };
+            let with_mean = |count: u64, sp: Option<String>| match sp {
+                Some(s) => format!("{} {s}", human_count(count)),
                 None => human_count(count),
             };
             let mut cols: Vec<(String, Style)> = vec![(
                 format!(
                     "backup {}",
-                    with_mean(hc.backuped_total.unwrap_or(0), hc.backup_mean_secs)
+                    with_mean(
+                        hc.backuped_total.unwrap_or(0),
+                        speed(hc.backup_gbps, hc.backup_mean_secs)
+                    )
                 ),
                 Style::default().fg(th.c("graph_text")),
             )];
@@ -381,7 +399,10 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
             ));
             if let Some(rb) = hc.load_back_total {
                 cols.push((
-                    format!("back {}", with_mean(rb, hc.load_back_mean_secs)),
+                    format!(
+                        "back {}",
+                        with_mean(rb, speed(hc.load_back_gbps, hc.load_back_mean_secs))
+                    ),
                     Style::default().fg(th.c("graph_text")),
                 ));
             }
@@ -845,6 +866,8 @@ mod tests {
             storage_prefetched_total: None,
             backup_mean_secs: None,
             load_back_mean_secs: None,
+            backup_gbps: None,
+            load_back_gbps: None,
         };
         Snapshot {
             kv: crate::model::snapshot::KvPanel {
@@ -916,6 +939,23 @@ mod tests {
             bare.contains("backup 72.5M") && !bare.contains("21ms"),
             "{bare}"
         );
+    }
+
+    // While a copy runs in the rate window the speed slot shows achieved
+    // bandwidth (transfer-time denominator); the cumulative mean is the
+    // idle fallback, never shown alongside a live bandwidth number.
+    #[test]
+    fn hicache_speed_prefers_live_bandwidth() {
+        let mut s = snap_hicache();
+        let hc = s.kv.hicache.as_mut().unwrap();
+        hc.backup_mean_secs = Some(0.0214);
+        hc.backup_gbps = Some(21.3e9);
+        hc.load_back_mean_secs = Some(0.5);
+        hc.load_back_gbps = Some(340.0e6);
+        let text = render_kv(&s, 80);
+        assert!(text.contains("backup 72.5M 21.3GB/s"), "{text}");
+        assert!(text.contains("back 11.1M 340.0MB/s"), "{text}");
+        assert!(!text.contains("21ms"), "mean yields to bandwidth: {text}");
     }
 
     fn snap_with_latency(set: LatencySet) -> Snapshot {
