@@ -532,19 +532,15 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
             "cache ",
             Style::default().fg(th.c("title")).bold(),
         )];
+        let dim_style = Style::default().fg(if dim {
+            th.c("inactive_fg")
+        } else {
+            th.c("main_fg")
+        });
+        let lab_style = Style::default().fg(th.c("graph_text"));
         if tiers_on {
-            let val = |v: u64| {
-                Span::styled(
-                    human_count(v),
-                    Style::default().fg(if dim {
-                        th.c("inactive_fg")
-                    } else {
-                        th.c("main_fg")
-                    }),
-                )
-            };
-            let lab =
-                |t: &str| Span::styled(t.to_string(), Style::default().fg(th.c("graph_text")));
+            let val = |v: u64| Span::styled(human_count(v), dim_style);
+            let lab = |t: &str| Span::styled(t.to_string(), lab_style);
             row.push(lab("all "));
             row.push(val(cached_all));
             row.push(lab("  d "));
@@ -553,15 +549,8 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
             row.push(val(s.traffic.cached_host_total));
             row.push(lab("  s "));
             row.push(val(s.traffic.cached_storage_total));
-            row.push(Span::styled(
-                format!("  {}", human_pct(share)),
-                Style::default().fg(th.c("graph_text")),
-            ));
         } else {
-            row.push(Span::styled(
-                "rate ",
-                Style::default().fg(th.c("graph_text")),
-            ));
+            row.push(Span::styled("rate ", lab_style));
             row.push(value_cell(
                 s.traffic
                     .cached_device_tps
@@ -570,10 +559,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
                 th,
                 dim,
             ));
-            row.push(Span::styled(
-                " all ",
-                Style::default().fg(th.c("graph_text")),
-            ));
+            row.push(Span::styled(" all ", lab_style));
             row.push(value_cell(
                 Some(format!(
                     "{} ({})",
@@ -584,6 +570,40 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
                 th,
                 dim,
             ));
+        }
+        // Two trailing percentages compete: the all-time share and the
+        // windowed `now`. Both when the panel is wide; when only one fits,
+        // `now` wins — the all-time number is the stale one this round exists
+        // to correct, and write_lines would right-clip silently mid-number.
+        {
+            let avail = rect.width.saturating_sub(2) as usize;
+            let used: usize = row.iter().map(|sp| sp.width()).sum();
+            let all_pct = format!("  {}", human_pct(share));
+            let now_pct = if s.traffic.cache_window_known {
+                match s.traffic.cache_window_share {
+                    Some(win) => Some(format!("  now {}", human_pct(win))),
+                    None => Some("  now N/A".to_string()),
+                }
+            } else {
+                None
+            };
+            let room = |s: &str| used + s.len() <= avail;
+            // Both if they jointly fit; else only `now`; else only all-time.
+            let keep_all = tiers_on
+                && match &now_pct {
+                    Some(np) => room(&all_pct) && room(&format!("{all_pct}{np}")),
+                    None => room(&all_pct),
+                };
+            let keep_now = match &now_pct {
+                Some(np) => room(np),
+                None => false,
+            };
+            if keep_all {
+                row.push(Span::styled(all_pct, lab_style));
+            }
+            if keep_now {
+                row.push(Span::styled(now_pct.unwrap(), lab_style));
+            }
         }
         lines.push(Line::from(row));
     }
@@ -1011,6 +1031,30 @@ mod tests {
         assert!(text.contains("d 1.00k") && text.contains("h 500"), "{text}");
         // Share spans every tier: (1000+500)/2000 = 75%, not 50%.
         assert!(text.contains("75%"), "{text}");
+    }
+
+    // The `now` column tracks the family, not the value: known+rated shows
+    // the percentage, known+quiet shows an honest N/A, unknown shows nothing.
+    #[test]
+    fn cache_now_column_tracks_family_presence() {
+        let mut s = Snapshot::default();
+        s.traffic.cached_device_total = 1_000;
+        s.traffic.prompt_total_tokens = 2_000;
+
+        // Family absent → no `now` column at all.
+        let text = render_traffic(&s);
+        assert!(!text.contains("now"), "absent family: {text}");
+
+        // Family present, window filled → percentage.
+        s.traffic.cache_window_known = true;
+        s.traffic.cache_window_share = Some(0.8);
+        let text = render_traffic(&s);
+        assert!(text.contains("now 80%"), "filled window: {text}");
+
+        // Family present, window quiet → N/A, not a flicker back to all-time.
+        s.traffic.cache_window_share = None;
+        let text = render_traffic(&s);
+        assert!(text.contains("now N/A"), "quiet window: {text}");
     }
 
     // The GPU memory ledger appears only once sglang reports the ledgers, and

@@ -292,7 +292,7 @@ pub struct TrafficPanel {
     /// unlike the instantaneous hit gauge.
     pub cached_device_tps: Option<f64>,
     pub cached_device_total: u64,
-    /// HiCache tier totals from the same `cached_tokens_total` family, whose
+    /// All-time tier totals from the same `cached_tokens_total` family, whose
     /// `cache_source` label also carries `host` and `storage_*` (the storage
     /// spelling carries the backend: `storage_HiCacheNixl`). On a
     /// hierarchical-cache server the device-only share hides most of the wins
@@ -300,6 +300,16 @@ pub struct TrafficPanel {
     /// such source on the server) → the tier isn't shown.
     pub cached_host_total: u64,
     pub cached_storage_total: u64,
+    /// Window prefix-cache share: rate(hits) / rate(all modes) over the
+    /// 30s rate window, per sglang's own formula on
+    /// `prefill_effective_tokens_total`. The all-time totals above go stale —
+    /// 15% at minute 30 looks identical to 15% at minute 100; this is what
+    /// the cache is doing *now*. None while the window is too quiet to say.
+    pub cache_window_share: Option<f64>,
+    /// True when the last scrape carried the `prefill_effective_tokens_total`
+    /// family — fixes the readout's spelling (`now …`) instead of letting it
+    /// flicker between now/all-time as windows go quiet.
+    pub cache_window_known: bool,
     /// Mean request length (tokens), from the request-length histograms'
     /// sum/count — cumulative means over all served requests. Histogram
     /// medians would need bucket arithmetic; the mean is exact and cheap.
@@ -369,6 +379,8 @@ impl Default for TrafficPanel {
             cached_device_total: 0,
             cached_host_total: 0,
             cached_storage_total: 0,
+            cache_window_share: None,
+            cache_window_known: false,
             avg_prompt_len: None,
             avg_gen_len: None,
             avg_uncached_len: None,

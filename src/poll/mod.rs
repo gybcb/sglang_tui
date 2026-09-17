@@ -514,6 +514,45 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         };
         s.traffic.cached_host_total = tier_sum("host");
         s.traffic.cached_storage_total = tier_sum("storage");
+
+        // Windowed cache share (prefill_effective_tokens_total) — sglang's own
+        // formula: rate(sum of *_hit) / rate(sum of all modes). The all-time
+        // totals above go stale; this is what the cache is doing now.
+        //
+        // Unlike the additive reads elsewhere, this is a ratio, so a partial
+        // baseline poisons it: rate_sum tolerates members still without a
+        // baseline, and a numerator counting 3 of 4 modes against a denominator
+        // counting all 4 silently understates the share. So require *every*
+        // member to have one — a window that can't fully answer says N/A.
+        let effective: Vec<(&str, String, f64)> = m
+            .get("sglang:prefill_effective_tokens_total")
+            .filter(|x| !x.value.is_nan())
+            .map(|x| (x.label("mode").unwrap_or_default(), x.key(), x.value))
+            .collect();
+        s.traffic.cache_window_known = !effective.is_empty();
+        s.traffic.cache_window_share = if effective.is_empty() {
+            None
+        } else {
+            let rated: Vec<(&str, Option<f64>)> = effective
+                .iter()
+                .map(|(mode, key, v)| (*mode, rates.rate(key, now, *v)))
+                .collect();
+            let sum_where = |f: fn(&str) -> bool| -> Option<f64> {
+                let mut sum = 0.0;
+                for (mode, r) in &rated {
+                    if f(mode) {
+                        sum += (*r)?;
+                    }
+                }
+                Some(sum)
+            };
+            let is_hit = |mode: &str| mode.ends_with("_hit");
+            let everything = |_: &str| true;
+            match (sum_where(is_hit), sum_where(everything)) {
+                (Some(hit), Some(all)) if all > 0.0 => Some((hit / all).clamp(0.0, 1.0)),
+                _ => None,
+            }
+        };
     }
 
     // --- request-length means (histogram sum/count) -------------------------
@@ -1259,5 +1298,69 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
         assert!((tk - 3.0).abs() < 0.05, "6 cpu-sec / 2s = 3 cores: {tk}");
         let dk = s.engine.detokenizer_cores.unwrap();
         assert!((dk - 1.0).abs() < 0.05, "detok cores: {dk}");
+    }
+
+    // The windowed cache share is a *ratio*, not another counter: it needs
+    // every mode's rate before the divide, and the ratio itself must be
+    // hit/all — not the all-time totals the tier row already shows.
+    const EFFECTIVE_FIXTURE: &str = r#"
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="input"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="device_hit"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="host_hit"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="storage_hit"} 0.0
+"#;
+
+    #[test]
+    fn cache_window_share_is_a_ratio_and_needs_a_full_baseline() {
+        let m1 = prom::parse(EFFECTIVE_FIXTURE);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(&m1, &mut st, t0, Duration::from_millis(5), &mut s);
+
+        // Family present, but no second sample → we know the server speaks it,
+        // yet cannot answer the question. `known` fixes the UI's spelling.
+        assert!(s.traffic.cache_window_known);
+        assert!(
+            s.traffic.cache_window_share.is_none(),
+            "first scrape has no rate"
+        );
+
+        let m2 = prom::parse(
+            &EFFECTIVE_FIXTURE
+                .replace("mode=\"input\"} 0.0", "mode=\"input\"} 100.0")
+                .replace("mode=\"device_hit\"} 0.0", "mode=\"device_hit\"} 300.0")
+                .replace("mode=\"host_hit\"} 0.0", "mode=\"host_hit\"} 60.0")
+                .replace("mode=\"storage_hit\"} 0.0", "mode=\"storage_hit\"} 40.0"),
+        );
+        build(
+            &m2,
+            &mut st,
+            t0 + Duration::from_secs(2),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        // (300+60+40) / (100+300+60+40) = 0.8 — the `input` mode is the
+        // uncached remainder and belongs in the denominator only.
+        let win = s.traffic.cache_window_share.unwrap();
+        assert!((win - 0.8).abs() < 1e-6, "windowed hit share: {win}");
+    }
+
+    // A server that never exposes the family says nothing at all: not N/A, not
+    // 0% — the UI's `now` column simply doesn't exist there.
+    #[test]
+    fn cache_window_absent_family_stays_unknown() {
+        let m = prom::parse(HTTP_FIXTURE);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(
+            &m,
+            &mut st,
+            Instant::now(),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        assert!(!s.traffic.cache_window_known);
+        assert!(s.traffic.cache_window_share.is_none());
     }
 }
