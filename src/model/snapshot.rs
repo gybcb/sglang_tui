@@ -310,6 +310,18 @@ impl Default for KvPanel {
     }
 }
 
+/// One HTTP route the server serves, from `http_requests_total{endpoint}`.
+/// Window rate plus lifetime count — the count keeps quiet endpoints ordered
+/// (and distinguishes "never served" from "not serving right now").
+#[derive(Debug)]
+pub struct HttpEndpoint {
+    pub path: String,
+    /// Window rate (req/s); None until this route has a rate baseline.
+    pub rps: Option<f64>,
+    /// Lifetime count of requests served on this route.
+    pub total: u64,
+}
+
 /// Left bottom — btop's NET-box analog. The NET triple is current/peak/accum
 /// per direction, mapped 1:1: current=rate, peak=max-of-series, accum=total.
 #[derive(Debug)]
@@ -330,6 +342,11 @@ pub struct TrafficPanel {
     pub http_rps: Option<f64>,
     pub http_err_rate: Option<f64>,
     pub http_active: Option<u64>,
+    /// Per-route rate breakdown behind `http_rps` — "what traffic is hitting
+    /// this server right now". Sorted busiest-first. The panel has no spare
+    /// row for it, so it lives in the `i` overlay (same division as request
+    /// stages and the latency set). Empty when the family is absent.
+    pub http_endpoints: Vec<HttpEndpoint>,
     /// Device prefix-cache inflow: rate (per second) and lifetime total of
     /// `cached_tokens_total{cache_source="device"}`. Total/prompt-total is the
     /// all-time cache share — the durable answer to "is caching working",
@@ -429,6 +446,7 @@ impl Default for TrafficPanel {
             http_rps: None,
             http_err_rate: None,
             http_active: None,
+            http_endpoints: Vec::new(),
             cached_device_tps: None,
             cached_device_total: 0,
             cached_host_total: 0,

@@ -341,6 +341,53 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             ));
         }
     }
+    // `http_rps` on the traffic panel says *how much* traffic arrives; this
+    // says *what*: a load test hammering /generate and a health-check loop
+    // hitting /health look identical there. Routes once baselined stay listed
+    // with their live rate (0 = idle now) beside the lifetime total — "what
+    // this server serves, and what it's serving right now".
+    let eps: Vec<_> = snap
+        .traffic
+        .http_endpoints
+        .iter()
+        .filter(|e| e.rps.is_some())
+        .collect();
+    if !eps.is_empty() {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "http endpoints",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        for e in eps {
+            let rate = e.rps.unwrap_or(0.0);
+            // Route paths run longer than wide_row's 20-wide label
+            // (`/v1/responses/input_tokens`); keep the head — routes branch
+            // at the front — ellipsis the tail, so values stay columnar.
+            let mut path = String::new();
+            let mut w = 0;
+            for ch in e.path.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw > 19 {
+                    path.push('…');
+                    break;
+                }
+                w += cw;
+                path.push(ch);
+            }
+            // Fractional req/s, not human_rate: a health-check loop is a
+            // fraction of a request per second, and human_count's u64 cast
+            // would render every quiet route as an identical 0. One decimal
+            // below 100 keeps the column readable without false precision.
+            v.push(wide_row(
+                &path,
+                &format!(
+                    "{rate:.1}/s  total {}",
+                    crate::ui::panels::human::human_count(e.total),
+                ),
+                th,
+            ));
+        }
+    }
     // All-time mean request lengths. The traffic panel's `len` row shows the
     // 30s window (what's happening now); the durable all-traffic profile is
     // the overlay's kind of fact, same division as the cache row's now/all.
@@ -542,5 +589,44 @@ mod tests {
             text.contains("request_process") && text.contains("0ms"),
             "{text}"
         );
+    }
+
+    // The endpoint block answers "what traffic is hitting this server" —
+    // routes with a window rate, busiest first. Routes never served rate None
+    // and get no row: a quiet server must not show every historical route as
+    // equally alive.
+    #[test]
+    fn server_info_lists_http_endpoints() {
+        let mut snap = Snapshot::default();
+        snap.server.loaded = true;
+        snap.traffic.http_endpoints = vec![
+            crate::model::snapshot::HttpEndpoint {
+                path: "/generate".into(),
+                rps: Some(12.0),
+                total: 34567,
+            },
+            crate::model::snapshot::HttpEndpoint {
+                path: "/health".into(),
+                rps: None,
+                total: 9,
+            },
+        ];
+        let text = render_overlay(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &snap,
+            false,
+            1000,
+            80,
+            40,
+        );
+        assert!(text.contains("http endpoints"), "{text}");
+        assert!(
+            text.contains("/generate") && text.contains("12.0/s") && text.contains("total 34.6k"),
+            "{text}"
+        );
+        assert!(!text.contains("/health"), "{text}");
+        // ^ unrated route (no baseline) gets no row: the block lists what's
+        // being served, not every route the server has ever registered.
     }
 }

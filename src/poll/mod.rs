@@ -519,16 +519,52 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     // --- sglang's own HTTP surface (our endpoint, /metrics, excluded) ------
     {
         let mine = |x: &prom::Sample| x.label("endpoint") == Some("/metrics");
-        let req_pts: Vec<(String, f64)> = m
+        // One pass: per-series rate baselines feed both the aggregate rps and
+        // the per-endpoint breakdown. Summing recorded rates (Some-only,
+        // None-skipped) matches rate_sum's additive-partial semantics.
+        let req_pts: Vec<(String, String, f64)> = m
             .get("sglang:http_requests_total")
             .filter(|x| !mine(x))
-            .map(|x| (x.key(), x.value))
+            .map(|x| {
+                (
+                    x.key(),
+                    x.label("endpoint").unwrap_or("?").to_string(),
+                    x.value,
+                )
+            })
             .collect();
-        s.traffic.http_rps = if req_pts.is_empty() {
-            None
-        } else {
-            rates.rate_sum(now, req_pts.iter().map(|(k, v)| (k.as_str(), *v)))
-        };
+        let mut agg: Option<f64> = None;
+        let mut by_ep: std::collections::BTreeMap<String, (Option<f64>, u64)> =
+            std::collections::BTreeMap::new();
+        for (key, endpoint, value) in &req_pts {
+            let r = rates.rate(key, now, *value);
+            if let Some(r) = r {
+                agg = Some(agg.unwrap_or(0.0) + r);
+            }
+            let e = by_ep.entry(endpoint.clone()).or_default();
+            if let Some(r) = r {
+                e.0 = Some(e.0.unwrap_or(0.0) + r);
+            }
+            if value.is_finite() {
+                e.1 += *value as u64;
+            }
+        }
+        s.traffic.http_rps = agg;
+        let mut eps: Vec<crate::model::snapshot::HttpEndpoint> = by_ep
+            .into_iter()
+            .map(|(path, (rps, total))| crate::model::snapshot::HttpEndpoint { path, rps, total })
+            .collect();
+        // Busiest first; lifetime count breaks rate ties (and orders an
+        // entirely quiet server's endpoints by historical share).
+        eps.sort_by(|a, b| {
+            b.rps
+                .unwrap_or(0.0)
+                .partial_cmp(&a.rps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.total.cmp(&a.total))
+        });
+        eps.truncate(12); // endpoint cardinality is a fixed route list; cap anyway (R8)
+        s.traffic.http_endpoints = eps;
         // Errors: responses with status >= 400 over the same window.
         let err_pts: Vec<(String, f64)> = m
             .get("sglang:http_responses_total")
@@ -1663,6 +1699,99 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
         assert!((tk - 3.0).abs() < 0.05, "6 cpu-sec / 2s = 3 cores: {tk}");
         let dk = s.engine.detokenizer_cores.unwrap();
         assert!((dk - 1.0).abs() < 0.05, "detok cores: {dk}");
+    }
+
+    // The aggregate rps row is half the story: /generate and /health are the
+    // same count of requests per second. Each route gets its own baseline and
+    // the aggregate is the sum of what's rated — a route appearing mid-run
+    // contributes nothing to either, rather than dragging the sum to None.
+    #[test]
+    fn http_endpoints_break_down_the_aggregate_rate() {
+        // Two routes, different rates, plus /metrics growing fastest (must be
+        // excluded from the list entirely, not merely unrated).
+        let scrape = |a: u64, b: u64| {
+            format!(
+                "sglang:http_requests_total{{endpoint=\"/generate\"}} {a}\n\
+                 sglang:http_requests_total{{endpoint=\"/health\"}} {b}\n\
+                 sglang:http_requests_total{{endpoint=\"/metrics\"}} 999999\n"
+            )
+        };
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(
+            &prom::parse(&scrape(100, 30)),
+            &mut st,
+            t0,
+            Duration::from_millis(5),
+            &mut s,
+        );
+        // First scrape baselines everything: no rates, but the route list is
+        // already alive — totals are known before any delta.
+        assert_eq!(s.traffic.http_rps, None);
+        assert_eq!(s.traffic.http_endpoints.len(), 2, "/metrics excluded");
+        assert!(s.traffic.http_endpoints.iter().all(|e| e.rps.is_none()));
+        assert_eq!(
+            s.traffic.http_endpoints[0].total, 100,
+            "busiest-first tie broken by total: {:?}",
+            s.traffic.http_endpoints
+        );
+
+        build(
+            &prom::parse(&scrape(200, 80)),
+            &mut st,
+            t0 + Duration::from_secs(2),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        let rps = s.traffic.http_rps.unwrap();
+        assert!((rps - 75.0).abs() < 0.01, "sum of both routes: {rps}");
+        let eps = &s.traffic.http_endpoints;
+        assert_eq!(eps[0].path, "/generate");
+        assert!((eps[0].rps.unwrap() - 50.0).abs() < 0.01);
+        assert_eq!(eps[0].total, 200);
+        assert_eq!(eps[1].path, "/health");
+        assert!((eps[1].rps.unwrap() - 25.0).abs() < 0.01);
+    }
+
+    // A route that appears mid-run has no baseline: no rate for its row, and
+    // no None-poisoning of the aggregate (the single-pass rule gives exactly
+    // this — its rate() returns None, contributing to neither).
+    #[test]
+    fn http_endpoint_appearing_mid_run_is_unrated_not_zero() {
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(
+            &prom::parse("sglang:http_requests_total{endpoint=\"/a\"} 10\n"),
+            &mut st,
+            t0,
+            Duration::from_millis(5),
+            &mut s,
+        );
+        build(
+            &prom::parse(
+                "sglang:http_requests_total{endpoint=\"/a\"} 20\n\
+                 sglang:http_requests_total{endpoint=\"/new\"} 1\n",
+            ),
+            &mut st,
+            t0 + Duration::from_secs(1),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        assert_eq!(
+            s.traffic.http_rps,
+            Some(10.0),
+            "new route adds nothing, not None"
+        );
+        let new = s
+            .traffic
+            .http_endpoints
+            .iter()
+            .find(|e| e.path == "/new")
+            .expect("new route listed");
+        assert_eq!(new.rps, None, "no baseline yet — not a fake 0");
+        assert_eq!(new.total, 1, "lifetime count is known immediately");
     }
 
     // The windowed cache share is a *ratio*, not another counter: it needs
