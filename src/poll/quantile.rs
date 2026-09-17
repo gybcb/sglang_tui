@@ -29,6 +29,17 @@ pub const FAMILIES: [&str; 4] = [
     "sglang:e2e_request_latency_seconds",
 ];
 
+/// Request-length histograms tracked for their *windowed* mean only (no
+/// percentiles drawn): an all-time sum/count mean goes stale — 65.7k avg
+/// prompt at request 21k looks identical to one at request 2M — while the
+/// rate-window mean says what the traffic is *now*, the same argument that
+/// put `now …` on the cache row. Buckets aren't scraped for these families.
+pub const MEAN_ONLY: [&str; 3] = [
+    "sglang:prompt_tokens_histogram",
+    "sglang:generation_tokens_histogram",
+    "sglang:uncached_prompt_tokens_histogram",
+];
+
 /// Bucket edge as an orderable key (f64 is not Ord; total order via
 /// `total_cmp`, which orders -0.0/+0.0 and puts +Inf above every finite).
 /// NaN never reaches here — `update` rejects non-finite values upstream.
@@ -186,7 +197,8 @@ impl HistTracker {
             } else {
                 continue;
             };
-            if !FAMILIES.contains(&base) || !x.value.is_finite() || x.value < 0.0 {
+            let mean_only = MEAN_ONLY.contains(&base);
+            if (!FAMILIES.contains(&base) && !mean_only) || !x.value.is_finite() || x.value < 0.0 {
                 continue;
             }
             let entry = scraped
@@ -195,6 +207,9 @@ impl HistTracker {
                 .entry(subject_key(x))
                 .or_default();
             if x.name.ends_with("_bucket") {
+                if mean_only {
+                    continue; // no percentiles drawn for these families
+                }
                 let le = match x.label("le") {
                     Some("+Inf") => f64::INFINITY,
                     Some(v) => match v.parse::<f64>() {
@@ -277,6 +292,27 @@ impl HistTracker {
         s.e2e = self.latency(FAMILIES[3], now);
     }
 
+    /// Windowed mean (Δsum/Δcount over HIST_WINDOW, all subjects merged) for
+    /// a MEAN_ONLY family. None while the window holds no observations —
+    /// a quiet window says nothing, and N/A beats a stale all-time mean.
+    pub fn windowed_mean(&self, base: &str, now: Instant) -> Option<f64> {
+        let subjects = self.subjects.get(base)?;
+        let (mut dsum, mut dcnt) = (0.0f64, 0.0f64);
+        for sub in subjects.values() {
+            for (ts, s, c) in &sub.sums {
+                if now.duration_since(*ts) <= HIST_WINDOW {
+                    dsum += s;
+                    dcnt += c;
+                }
+            }
+        }
+        if dcnt > 0.0 && dsum.is_finite() {
+            Some(dsum / dcnt)
+        } else {
+            None
+        }
+    }
+
     /// True once the latest scrapes have baselined at least one series of this
     /// family — the row is worth drawing (N/A until the first delta fills it).
     fn known(&self, base: &str) -> bool {
@@ -291,6 +327,12 @@ impl HistTracker {
         for x in &m.samples {
             if let Some(base) = x.name.strip_suffix("_bucket")
                 && FAMILIES.contains(&base)
+            {
+                alive.insert((base, subject_key(x)));
+            }
+            // MEAN_ONLY families carry no bucket lines; _count marks them alive.
+            if let Some(base) = x.name.strip_suffix("_count")
+                && MEAN_ONLY.contains(&base)
             {
                 alive.insert((base, subject_key(x)));
             }

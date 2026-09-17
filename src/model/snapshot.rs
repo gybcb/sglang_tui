@@ -363,6 +363,10 @@ pub struct TrafficPanel {
     /// what prefill actually processes after cache hits. Against avg_prompt_len
     /// it turns the cache ratio into per-request work saved.
     pub avg_uncached_len: Option<f64>,
+    /// Same three means over the 30s histogram window, in the same order
+    /// ([prompt, gen, uncached]) — what the traffic is *now*; the all-time
+    /// means above go stale. None = quiet window → N/A on the panel row.
+    pub len_window: [Option<f64>; 3],
     /// Request-lifecycle stage latencies (per_stage_req_latency_seconds):
     /// (stage, mean secs) sorted slowest-first. The percentile rows answer
     /// "how long end to end"; these answer "where did it go" (request
@@ -434,6 +438,7 @@ impl Default for TrafficPanel {
             avg_prompt_len: None,
             avg_gen_len: None,
             avg_uncached_len: None,
+            len_window: [None; 3],
             stage_means: Vec::new(),
             req_rate_in: 0.0,
             req_rate_out: 0.0,

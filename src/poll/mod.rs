@@ -648,9 +648,23 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
                 Some(sum / count)
             }
         };
+        // All-time means answer "what kind of traffic is this server"; they
+        // live in the server-info overlay. The traffic panel shows the
+        // same window they can't hide: a 30s-window Δsum/Δcount mean (same
+        // staleness argument, same fix, as the cache row's `now …`).
         s.traffic.avg_prompt_len = mean("sglang:prompt_tokens_histogram");
         s.traffic.avg_gen_len = mean("sglang:generation_tokens_histogram");
         s.traffic.avg_uncached_len = mean("sglang:uncached_prompt_tokens_histogram");
+        // No fallback to the all-time mean on a quiet window — that's the
+        // stale number this column exists to avoid. One scrape's worth of
+        // startup N/A is honest; a history-dominated mean is not.
+        s.traffic.len_window = [
+            st.hist.windowed_mean("sglang:prompt_tokens_histogram", now),
+            st.hist
+                .windowed_mean("sglang:generation_tokens_histogram", now),
+            st.hist
+                .windowed_mean("sglang:uncached_prompt_tokens_histogram", now),
+        ];
     }
 
     // --- request-stage latency breakdown (per_stage_req_latency_seconds) ----
@@ -1083,6 +1097,61 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert_eq!(s.kv.swa_available, Some(0), "zero free is a fact");
         assert_eq!(s.kv.mamba_available, Some(2));
         assert_eq!(s.kv.mamba_evictable, Some(30));
+    }
+
+    // The len row must show what the traffic is *now*: the window mean,
+    // not the history-dominated all-time mean. Window empty (first scrape)
+    // → None (N/A), never the stale number.
+    const LEN_FIXTURE: &str = "{FIXTURE}\n\
+        sglang:prompt_tokens_histogram_sum{model_name=\"qwen\",t=\"p\"} 100000\n\
+        sglang:prompt_tokens_histogram_count{model_name=\"qwen\",t=\"p\"} 100\n\
+        sglang:generation_tokens_histogram_sum{model_name=\"qwen\",t=\"g\"} 500\n\
+        sglang:generation_tokens_histogram_count{model_name=\"qwen\",t=\"g\"} 100\n\
+        sglang:uncached_prompt_tokens_histogram_sum{model_name=\"qwen\",t=\"u\"} 5000\n\
+        sglang:uncached_prompt_tokens_histogram_count{model_name=\"qwen\",t=\"u\"} 100\n";
+
+    #[test]
+    fn len_window_mean_tracks_recent_traffic_not_history() {
+        let f1 = LEN_FIXTURE.replace("{FIXTURE}", FIXTURE);
+        // Only the prompt family grows: +40000 tokens over +20 requests.
+        let f2 = f1
+            .replace(
+                "sglang:prompt_tokens_histogram_sum{model_name=\"qwen\",t=\"p\"} 100000",
+                "sglang:prompt_tokens_histogram_sum{model_name=\"qwen\",t=\"p\"} 140000",
+            )
+            .replace(
+                "sglang:prompt_tokens_histogram_count{model_name=\"qwen\",t=\"p\"} 100",
+                "sglang:prompt_tokens_histogram_count{model_name=\"qwen\",t=\"p\"} 120",
+            );
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(&prom::parse(&f1), &mut st, t0, Duration::ZERO, &mut s);
+        assert!(
+            s.traffic.len_window[0].is_none(),
+            "first scrape has no window"
+        );
+        assert_eq!(s.traffic.avg_prompt_len, Some(1000.0), "all-time kept");
+        build(
+            &prom::parse(&f2),
+            &mut st,
+            t0 + Duration::from_secs(2),
+            Duration::ZERO,
+            &mut s,
+        );
+        // Window: +40000 tokens / +20 requests = 2000 (now-heavy), while the
+        // all-time mean stays 140000/120 ≈ 1166.
+        assert!(
+            (s.traffic.len_window[0].unwrap() - 2000.0).abs() < 1.0,
+            "{:?}",
+            s.traffic.len_window[0]
+        );
+        assert!(
+            (s.traffic.avg_prompt_len.unwrap() - 1166.67).abs() < 1.0,
+            "all-time distinct from window"
+        );
+        // No gen growth in the window → that column is N/A, not the stale mean.
+        assert!(s.traffic.len_window[1].is_none());
     }
 
     #[test]

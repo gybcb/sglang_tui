@@ -694,10 +694,13 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
         lines.push(Line::from(row));
     }
 
-    // Mean request lengths (histogram sum/count): "what kind of traffic is
-    // this" at a glance — long-context vs chatty — invisible in rate rows.
-    // `comp` = computed (uncached) prompt length: next to `in`, the gap is
-    // the per-request compute the cache saved.
+    // Mean request lengths over the 30s histogram window: "what kind of
+    // traffic is this *now*" — long-context vs chatty — invisible in rate
+    // rows. `comp` = computed (uncached) prompt length: next to `in`, the
+    // gap is the per-request compute the cache saved. The row shows when the
+    // families exist; a quiet window reads N/A (an all-time mean — what this
+    // row used to show — is dominated by history: 65.7k at request 21k looks
+    // identical to 65.7k at request 2M). All-time lives in the `i` overlay.
     if s.traffic.avg_prompt_len.is_some()
         || s.traffic.avg_gen_len.is_some()
         || s.traffic.avg_uncached_len.is_some()
@@ -708,9 +711,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
         )];
         row.push(Span::styled("in ", Style::default().fg(th.c("graph_text"))));
         row.push(value_cell(
-            s.traffic
-                .avg_prompt_len
-                .map(|v| format!("{} tok", human_count(v as u64))),
+            s.traffic.len_window[0].map(|v| format!("{} tok", human_count(v as u64))),
             10,
             th,
             dim,
@@ -720,9 +721,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
             Style::default().fg(th.c("graph_text")),
         ));
         row.push(value_cell(
-            s.traffic
-                .avg_gen_len
-                .map(|v| format!("{} tok", human_count(v as u64))),
+            s.traffic.len_window[1].map(|v| format!("{} tok", human_count(v as u64))),
             8,
             th,
             dim,
@@ -733,9 +732,7 @@ pub fn traffic(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer)
                 Style::default().fg(th.c("graph_text")),
             ));
             row.push(value_cell(
-                s.traffic
-                    .avg_uncached_len
-                    .map(|v| format!("{} tok", human_count(v as u64))),
+                s.traffic.len_window[2].map(|v| format!("{} tok", human_count(v as u64))),
                 9,
                 th,
                 dim,

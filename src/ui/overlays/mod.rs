@@ -341,6 +341,30 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             ));
         }
     }
+    // All-time mean request lengths. The traffic panel's `len` row shows the
+    // 30s window (what's happening now); the durable all-traffic profile is
+    // the overlay's kind of fact, same division as the cache row's now/all.
+    if snap.traffic.avg_prompt_len.is_some()
+        || snap.traffic.avg_gen_len.is_some()
+        || snap.traffic.avg_uncached_len.is_some()
+    {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "request lengths (all-time)",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        let len = |label: &str, v: Option<f64>| {
+            wide_row(
+                label,
+                &v.map(|x| format!("{} tok", crate::ui::panels::human::human_count(x as u64)))
+                    .unwrap_or_else(|| "—".into()),
+                th,
+            )
+        };
+        v.push(len("prompt", snap.traffic.avg_prompt_len));
+        v.push(len("generation", snap.traffic.avg_gen_len));
+        v.push(len("computed", snap.traffic.avg_uncached_len));
+    }
     if !s.loaded {
         v.push(Line::from(Span::styled(
             "metadata not yet fetched (auth-gated /server_info)",
