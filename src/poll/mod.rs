@@ -604,7 +604,6 @@ fn build_ranks(m: &prom::Metrics, now: Instant, s: &mut Snapshot) {
             spec_accept_length: pick("sglang:spec_accept_length"),
             spec_accept_rate: pick("sglang:spec_accept_rate"),
             gen_series: Default::default(),
-            ..Default::default()
         };
         // Reuse this rank's ring from the previous tick (found by dp_rank),
         // so history follows the rank across rebuilds.
