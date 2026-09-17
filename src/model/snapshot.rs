@@ -223,6 +223,14 @@ pub struct HiCache {
     /// (`hicache_prefetch_aux_alloc_failed_tokens_total`) — fetched data
     /// thrown away because mamba/aux pools were full. None = counter absent.
     pub prefetch_failed_total: Option<u64>,
+    /// Storage-tier (L3) traffic pair. sglang's HELP text is unhelpful
+    /// ("number of backuped tokens"); the label sets settle the direction —
+    /// this family carries `storage_backend` (the device→host
+    /// `hicache_backup_tokens_total` does not). A small prefetched/backuped
+    /// share = the tier preserves everything and reuses little.
+    /// None = family absent (no storage backend configured).
+    pub storage_backuped_total: Option<u64>,
+    pub storage_prefetched_total: Option<u64>,
 }
 
 impl Default for KvPanel {

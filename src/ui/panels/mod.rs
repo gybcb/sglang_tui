@@ -327,8 +327,30 @@ pub fn kv(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) {
             Style::default().fg(th.c("main_fg")),
         ));
         lines.push(Line::from(row));
+        // Storage-tier (L3) traffic pair. sglang's HELP text is vacuous
+        // ("number of backuped tokens"), but the labels settle it: this
+        // family carries `storage_backend` (hicache_backup_tokens_total does
+        // not), and prefetched≈1.08M matches the storage source on
+        // cached_tokens_total≈1.06M — so prefetch is the storage hit read
+        // back. The share says how much of what went to L3 ever came back.
+        if let (Some(bk), Some(pf)) = (hc.storage_backuped_total, hc.storage_prefetched_total) {
+            let reuse = if bk > 0 { pf as f64 / bk as f64 } else { 0.0 };
+            lines.push(Line::from(vec![
+                Span::styled("          store ", Style::default().fg(th.c("graph_text"))),
+                value_cell(Some(human_count(bk)), 10, th, dim),
+                Span::styled("  hit ", Style::default().fg(th.c("graph_text"))),
+                value_cell(
+                    Some(format!("{} ({})", human_count(pf), human_pct(reuse))),
+                    14,
+                    th,
+                    dim,
+                ),
+            ]));
+        }
         // Where the evicted tokens went. A rising `drop` under host pressure
         // means HiCache can no longer keep up — evictions become lost work.
+        // (The `backup` here is device→host; the `storage` row above is the
+        // further host→L3 hop — same word, different hop.)
         if hc.backuped_total.is_some() || hc.dropped_total.is_some() {
             let failed = hc.prefetch_failed_total.unwrap_or(0);
             // Columns by keep-priority (alarm first). write_lines right-clips
@@ -789,6 +811,8 @@ mod tests {
             dropped_total: Some(0),
             load_back_total: Some(11_100_000),
             prefetch_failed_total: Some(48_800),
+            storage_backuped_total: None,
+            storage_prefetched_total: None,
         };
         Snapshot {
             kv: crate::model::snapshot::KvPanel {
@@ -818,6 +842,27 @@ mod tests {
             !narrow.contains("backup"),
             "routine backup dropped to keep fail: {narrow}"
         );
+    }
+
+    // The L3 (storage tier) round trip appears only when both counters exist,
+    // and carries the reuse share — a small share is the write-mostly-graveyard
+    // readout (data preserved, never looked at again).
+    #[test]
+    fn storage_round_trip_row_appears_with_counters() {
+        // Baseline (storage counters absent) has no L3 row at all.
+        let baseline = render_kv(&snap_hicache(), 52);
+        assert!(!baseline.contains("store"), "{baseline}");
+
+        let mut s = snap_hicache();
+        let hc = s.kv.hicache.as_mut().unwrap();
+        hc.storage_backuped_total = Some(82_500_000);
+        hc.storage_prefetched_total = Some(1_080_000);
+        let text = render_kv(&s, 52);
+        assert!(text.contains("store "), "{text}");
+        assert!(text.contains("82.5M"), "backup side: {text}");
+        assert!(text.contains("1.08M"), "prefetch side: {text}");
+        // Reuse share 1.08M/82.5M ≈ 1%.
+        assert!(text.contains("1%"), "reuse share: {text}");
     }
 
     fn snap_with_latency(set: LatencySet) -> Snapshot {

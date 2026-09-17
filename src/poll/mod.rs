@@ -357,6 +357,12 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         hicache.prefetch_failed_total =
             sum_if_present(m, "sglang:hicache_prefetch_aux_alloc_failed_tokens_total")
                 .map(|v| v as u64);
+        // L3 round trip (host ↔ storage). These counters are gated on a
+        // storage backend, not on hicache alone: absent → None → row hidden.
+        hicache.storage_backuped_total =
+            sum_if_present(m, "sglang:backuped_tokens_total").map(|v| v as u64);
+        hicache.storage_prefetched_total =
+            sum_if_present(m, "sglang:prefetched_tokens_total").map(|v| v as u64);
     }
 
     // --- TRAFFIC (NET triple × two directions) ---
@@ -897,7 +903,7 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert!(s.kv.hicache.is_none(), "no hicache metrics → None");
 
         let with_hc = format!(
-            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\nsglang:hicache_backup_tokens_total{{pool=\"kv\"}} 900\nsglang:hicache_dropped_tokens_total{{pool=\"kv\",reason=\"host_pressure\"}} 5\nsglang:load_back_tokens_total{{pool=\"kv\"}} 120\nsglang:hicache_prefetch_aux_alloc_failed_tokens_total{{storage_backend=\"nixl\"}} 30\n"
+            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\nsglang:hicache_backup_tokens_total{{pool=\"kv\"}} 900\nsglang:hicache_dropped_tokens_total{{pool=\"kv\",reason=\"host_pressure\"}} 5\nsglang:load_back_tokens_total{{pool=\"kv\"}} 120\nsglang:hicache_prefetch_aux_alloc_failed_tokens_total{{storage_backend=\"nixl\"}} 30\nsglang:backuped_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 800\nsglang:prefetched_tokens_total{{storage_backend=\"nixl\",dp_rank=\"0\"}} 10\n"
         );
         let mut s2 = Snapshot::default();
         build(
@@ -913,6 +919,9 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert_eq!(hc.dropped_total, Some(5));
         assert_eq!(hc.load_back_total, Some(120));
         assert_eq!(hc.host_total, 400);
+        // L3 round trip (distinct from the device→host hicache_backup family).
+        assert_eq!(hc.storage_backuped_total, Some(800));
+        assert_eq!(hc.storage_prefetched_total, Some(10));
     }
 
     #[test]
