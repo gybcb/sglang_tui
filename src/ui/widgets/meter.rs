@@ -35,19 +35,6 @@ pub fn meter_spans(frac: f64, width: usize, family: &str, th: &Theme) -> Vec<Spa
     spans
 }
 
-/// A meter run boxed in thin vertical caps `▏ … ▕` — the modern KV-bar
-/// treatment. `width` is the run length *between* the caps; the returned
-/// vec is `width + 2` long. Caps take `meter_bg` so the box reads as one
-/// unit whether or not the bar is full.
-pub fn meter_bar(frac: f64, width: usize, family: &str, th: &Theme) -> Vec<Span<'static>> {
-    let cap = Style::default().fg(th.c("meter_bg"));
-    let mut spans = Vec::with_capacity(width + 2);
-    spans.push(Span::styled("▏", cap));
-    spans.extend(meter_spans(frac, width, family, th));
-    spans.push(Span::styled("▕", cap));
-    spans
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,18 +60,5 @@ mod tests {
         let th = Theme::builtin("Default", ColorMode::TrueColor);
         assert_eq!(meter_spans(-1.0, 5, "cpu", &th).len(), 5);
         assert_eq!(meter_spans(3.0, 5, "cpu", &th).len(), 5);
-    }
-
-    #[test]
-    fn meter_bar_caps_both_ends() {
-        let th = Theme::builtin("Default", ColorMode::TrueColor);
-        let bar = meter_bar(0.5, 10, "cpu", &th);
-        assert_eq!(bar.len(), 12, "run + two caps");
-        assert_eq!(bar[0].content, "▏");
-        assert_eq!(bar[11].content, "▕");
-        assert_eq!(bar[0].style.fg, Some(th.c("meter_bg")));
-        assert_eq!(bar[11].style.fg, Some(th.c("meter_bg")));
-        // Interior is the plain run.
-        assert_eq!(bar[1].content, BLOCK.to_string());
     }
 }

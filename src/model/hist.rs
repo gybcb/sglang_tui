@@ -50,8 +50,12 @@ impl Ring {
     pub fn tail(&self, n: usize, out: &mut Vec<f64>) {
         out.clear();
         let n = n.min(self.len);
-        // oldest index = (head - len) mod cap; walk forward n samples ending at head.
-        let start = (self.head + self.cap - self.len) % self.cap;
+        // The window is the *newest* n samples, ending at the last write
+        // (head-1), not the oldest n. Walking forward from `head - len`
+        // instead would return the oldest n whenever n < len, so a "peak
+        // over the visible window" readout could exclude the current sample
+        // entirely once history is longer than the window (x > y).
+        let start = (self.head + self.cap - n) % self.cap;
         out.reserve(n);
         for i in 0..n {
             out.push(self.buf[(start + i) % self.cap]);
@@ -101,3 +105,53 @@ impl Default for Ring {
 /// History capacity: enough for the widest conceivable terminal at 2
 /// samples/braille-cell, with headroom.
 pub const HIST_CAP: usize = 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for the ENGINE `cur/max` readout: the max window must be the
+    // *newest* n samples, so the current value is always inside it (x <= y).
+    // The old `tail` computed the window start from `head - len` instead of
+    // `head - n`, so once history is longer than the window it returned the
+    // oldest n samples and the current sample fell out of the max.
+    #[test]
+    fn tail_window_is_newest_n_not_oldest_n() {
+        let mut r = Ring::new(8);
+        // Push 0,1,2,3,4,5,6,7 (fills), then 8,9 — wraps so len(=8) > n(=3).
+        for i in 0..10 {
+            r.push(i as f64);
+        }
+        assert_eq!(r.len(), 8, "ring full");
+        let newest3 = r.tail_owned(3);
+        assert_eq!(
+            newest3,
+            vec![7.0, 8.0, 9.0],
+            "window = newest 3, not oldest 3"
+        );
+    }
+
+    // The visible-window peak used by the `cur/max` readout must never be
+    // below the current sample.
+    #[test]
+    fn window_peak_includes_the_current_sample() {
+        let mut r = Ring::new(1024);
+        // A long quiet stretch, a modest peak, then a value well above it.
+        for _ in 0..300 {
+            r.push(100.0);
+        }
+        r.push(500.0); // the old peak, now far behind the window
+        for _ in 0..150 {
+            r.push(100.0);
+        }
+        r.push(1000.0); // current, higher than the stale peak
+
+        // A ~220s braille window (~440 samples) excludes the 500.0 peak.
+        let window = 440;
+        let mx = r.tail_owned(window).into_iter().fold(0.0f64, f64::max);
+        assert!(
+            mx >= 1000.0,
+            "window peak {mx} must include current 1000 (cur<=peak)"
+        );
+    }
+}

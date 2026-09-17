@@ -70,7 +70,12 @@ fn meta_from(model: &Value, server: &Value) -> ServerMeta {
         enable_dp_attention: b("enable_dp_attention"),
         enable_metrics_for_all_schedulers: b("enable_metrics_for_all_schedulers"),
         enable_hierarchical_cache: b("enable_hierarchical_cache"),
+        disaggregation_mode: s("disaggregation_mode").to_string(),
         max_total_num_tokens: None, // numeric path owns this (constant gauge)
+        context_len: server
+            .get("context_length")
+            .and_then(Value::as_u64)
+            .or_else(|| server.get("context_len").and_then(Value::as_u64)),
         loaded: true,
     }
 }
@@ -90,10 +95,14 @@ mod tests {
             "dp_size": 4,
             "enable_dp_attention": true,
             "enable_metrics_for_all_schedulers": false,
-            "enable_hierarchical_cache": true
+            "enable_hierarchical_cache": true,
+            "disaggregation_mode": "null",
+            "context_length": 262144
         });
         let model = json!({"model_path": "/models/m", "served_model_name": "李模型"});
         let m = meta_from(&model, &server);
+        assert_eq!(m.disaggregation_mode, "null");
+        assert_eq!(m.context_len, Some(262144));
         assert_eq!(m.tp_size, 8);
         assert_eq!(m.dp_size, 4);
         assert!(m.enable_dp_attention);

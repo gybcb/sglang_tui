@@ -237,6 +237,9 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         now,
     )
     .or_else(|| rate_of(m, rates, "sglang:prompt_tokens_total", now));
+    s.engine
+        .prefill_series
+        .push(s.engine.prefill_tps.unwrap_or(0.0));
     s.engine.decode_tps = rate_of_mode(m, rates, "sglang:realtime_tokens_total", "decode", now)
         .or_else(|| rate_of(m, rates, "sglang:generation_tokens_total", now));
     s.engine
@@ -248,22 +251,58 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     // aggregate-only series when ranks aren't attributed (sum_across_ranks).
     s.engine.running_reqs = sum_across_ranks(m, "sglang:num_running_reqs", true).max(0.0) as u64;
     s.engine.waiting_reqs = sum_across_ranks(m, "sglang:num_queue_reqs", true).max(0.0) as u64;
-    // No wall-clock "uptime seconds" gauge exists in sglang's metrics;
-    // `startup_time_seconds` is a per-phase startup *duration*, not an epoch.
-    // Faking uptime from it would be a false claim about the server → N/A.
-    s.engine.uptime = None;
+
+    // Helper-process CPU: rate of process_cpu_seconds_total = cores in use
+    // right now. A pegged tokenizer (cores >> 1 is fine — it's multi-worker;
+    // the readout is for trend/anomaly, not a hard threshold).
+    {
+        let mut cores = |component: &str| -> Option<f64> {
+            let pts: Vec<(String, f64)> = m
+                .get("sglang:process_cpu_seconds_total")
+                .filter(|x| x.label("component") == Some(component))
+                .map(|x| (x.key(), x.value))
+                .collect();
+            if pts.is_empty() {
+                None
+            } else {
+                rates.rate_sum(now, pts.iter().map(|(k, v)| (k.as_str(), *v)))
+            }
+        };
+        s.engine.tokenizer_cores = cores("tokenizer");
+        s.engine.detokenizer_cores = cores("detokenizer");
+    }
 
     // --- KV ---
     s.kv.used_tokens = sum_across_ranks(m, "sglang:num_used_tokens", true) as u64;
     s.kv.total_tokens = sum_across_ranks(m, "sglang:max_total_num_tokens", true) as u64;
+    // The info overlay reads it from ServerMeta; the gauge is the owner.
+    s.server.max_total_num_tokens = Some(s.kv.total_tokens);
     // token_usage is documented (sg_metrics.py:87) as max(full, swa, mamba)
     // per rank — the bottleneck. Cross-rank aggregate: max.
     s.kv.token_usage = max_val(m, "sglang:token_usage");
     s.kv.full_token_usage = first_val("sglang:full_token_usage");
     s.kv.swa_token_usage = first_val("sglang:swa_token_usage");
     s.kv.mamba_usage = first_val("sglang:mamba_usage");
+    s.kv.swa_used = sum_if_present(m, "sglang:swa_used_tokens").map(|v| v as u64);
+    s.kv.mamba_used = sum_if_present(m, "sglang:mamba_used_tokens").map(|v| v as u64);
     s.kv.available_tokens = sum_if_present(m, "sglang:kv_available_tokens").map(|v| v as u64);
     s.kv.evictable_tokens = sum_if_present(m, "sglang:kv_evictable_tokens").map(|v| v as u64);
+    // Lifetime eviction pressure: how many device slots have *ever* been
+    // freed. The instant `evictable` gauge only shows the current free-list;
+    // this counter shows how hard the cache has actually been working.
+    {
+        let ev: Vec<(String, f64)> = m
+            .get("sglang:evicted_tokens_total")
+            .map(|x| (x.key(), x.value))
+            .collect();
+        if ev.is_empty() {
+            s.kv.evicted_total = None;
+            s.kv.evicted_tps = None;
+        } else {
+            s.kv.evicted_total = Some(ev.iter().map(|(_, v)| *v as u64).sum());
+            s.kv.evicted_tps = rates.rate_sum(now, ev.iter().map(|(k, v)| (k.as_str(), *v)));
+        }
+    }
     s.kv.cache_hit_rate = first_val("sglang:cache_hit_rate").unwrap_or(0.0);
     s.kv.cache_hit_series.push(s.kv.cache_hit_rate);
     s.kv.weight_gb = sum_if_present(m, "sglang:weight_memory_usage_gb");
@@ -274,6 +313,21 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         let hicache = s.kv.hicache.get_or_insert(Default::default());
         hicache.host_used = sum_across_ranks(m, "sglang:hicache_host_used_tokens", true) as u64;
         hicache.host_total = sum_across_ranks(m, "sglang:hicache_host_total_tokens", true) as u64;
+        // Eviction destination split: tokens evicted from device are either
+        // backed up to host (recoverable) or destroyed (host full → lost work).
+        hicache.backuped_total =
+            sum_if_present(m, "sglang:hicache_backup_tokens_total").map(|v| v as u64);
+        hicache.dropped_total =
+            sum_if_present(m, "sglang:hicache_dropped_tokens_total").map(|v| v as u64);
+        // Backups that were actually re-used (host→GPU reload) — the loop's
+        // payoff: backup without load_back is speculating into dead memory.
+        hicache.load_back_total =
+            sum_if_present(m, "sglang:load_back_tokens_total").map(|v| v as u64);
+        // Storage prefetches that arrived but couldn't be allocated in the
+        // aux pools — paid-for bytes, thrown away. Non-zero = pool sizing bug.
+        hicache.prefetch_failed_total =
+            sum_if_present(m, "sglang:hicache_prefetch_aux_alloc_failed_tokens_total")
+                .map(|v| v as u64);
     }
 
     // --- TRAFFIC (NET triple × two directions) ---
@@ -297,12 +351,135 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     s.traffic.req_rate_out = s.traffic.gen_tps;
 
     s.traffic.aborted = sum_across_ranks(m, "sglang:num_aborted_requests_total", true) as u64;
-    s.traffic.retracted = sum_across_ranks(m, "sglang:num_retracted_requests_total", true) as u64;
+    // The real gauge name is num_retracted_reqs (with a legacy candidate);
+    // sum_across_ranks only reads one name, so pick the first present.
+    s.traffic.retracted = [
+        "sglang:num_retracted_requests_total",
+        "sglang:num_retracted_reqs",
+    ]
+    .iter()
+    .find_map(|n| m.get(n).next().map(|_| sum_across_ranks(m, n, true)))
+    .unwrap_or(0.0) as u64;
     s.traffic.paused = first_val("sglang:num_paused_reqs").unwrap_or(0.0).max(0.0) as u64;
     s.traffic.grammar_queue = first_val("sglang:num_grammar_queue_reqs")
         .unwrap_or(0.0)
         .max(0.0) as u64;
+    // PD-disaggregation queues. The gauges exist on every server (unified
+    // reports zeros), so read them *only* when the server told us it runs a
+    // disaggregation role — otherwise a unified box would show four misleading
+    // zeros and imply a PD topology that isn't there.
+    if matches!(
+        s.server.disaggregation_mode.as_str(),
+        "prefill" | "decode" | "both"
+    ) {
+        s.traffic.pd_prefill_bootstrap =
+            sum_if_present(m, "sglang:num_prefill_bootstrap_queue_reqs").map(|v| v as u64);
+        s.traffic.pd_prefill_inflight =
+            sum_if_present(m, "sglang:num_prefill_inflight_queue_reqs").map(|v| v as u64);
+        s.traffic.pd_decode_prealloc =
+            sum_if_present(m, "sglang:num_decode_prealloc_queue_reqs").map(|v| v as u64);
+        s.traffic.pd_decode_transfer =
+            sum_if_present(m, "sglang:num_decode_transfer_queue_reqs").map(|v| v as u64);
+    }
     s.traffic.latency = latency;
+
+    // --- sglang's own HTTP surface (our endpoint, /metrics, excluded) ------
+    {
+        let mine = |x: &prom::Sample| x.label("endpoint") == Some("/metrics");
+        let req_pts: Vec<(String, f64)> = m
+            .get("sglang:http_requests_total")
+            .filter(|x| !mine(x))
+            .map(|x| (x.key(), x.value))
+            .collect();
+        s.traffic.http_rps = if req_pts.is_empty() {
+            None
+        } else {
+            rates.rate_sum(now, req_pts.iter().map(|(k, v)| (k.as_str(), *v)))
+        };
+        // Errors: responses with status >= 400 over the same window.
+        let err_pts: Vec<(String, f64)> = m
+            .get("sglang:http_responses_total")
+            .filter(|x| {
+                !mine(x)
+                    && x.label("status_code")
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .unwrap_or(0)
+                        >= 400
+            })
+            .map(|x| (x.key(), x.value))
+            .collect();
+        s.traffic.http_err_rate = if err_pts.is_empty() {
+            None
+        } else {
+            rates.rate_sum(now, err_pts.iter().map(|(k, v)| (k.as_str(), *v)))
+        };
+        s.traffic.http_active = {
+            let mut sum = 0.0f64;
+            let mut any = false;
+            for x in m.get("sglang:http_requests_active") {
+                if !mine(x) && !x.value.is_nan() {
+                    sum += x.value;
+                    any = true;
+                }
+            }
+            if any { Some(sum.max(0.0) as u64) } else { None }
+        };
+    }
+
+    // --- device prefix-cache inflow (cached_tokens_total, per source) ------
+    {
+        let dev: Vec<(String, f64)> = m
+            .get("sglang:cached_tokens_total")
+            .filter(|x| x.label("cache_source") == Some("device"))
+            .map(|x| (x.key(), x.value))
+            .collect();
+        s.traffic.cached_device_tps = if dev.is_empty() {
+            None
+        } else {
+            rates.rate_sum(now, dev.iter().map(|(k, v)| (k.as_str(), *v)))
+        };
+        s.traffic.cached_device_total = if dev.is_empty() {
+            0
+        } else {
+            dev.iter().map(|(_, v)| *v as u64).sum()
+        };
+        // HiCache tiers ride the same family: cache_source is "host", or
+        // "storage_<backend>" (the backend is baked into the value). Read by
+        // prefix so a renamed backend (nixl→3fs→…) still lands.
+        let tier_sum = |prefix: &str| -> u64 {
+            m.get("sglang:cached_tokens_total")
+                .filter(|x| {
+                    x.label("cache_source")
+                        .is_some_and(|s| s.starts_with(prefix))
+                })
+                .filter(|x| !x.value.is_nan())
+                .map(|x| x.value.max(0.0) as u64)
+                .sum()
+        };
+        s.traffic.cached_host_total = tier_sum("host");
+        s.traffic.cached_storage_total = tier_sum("storage");
+    }
+
+    // --- request-length means (histogram sum/count) -------------------------
+    // Cumulative means, exact from the two counters — no bucket interpolation
+    // needed. A family absent or with zero count → N/A, not 0.
+    {
+        let mean = |fam: &str| -> Option<f64> {
+            let count = sum_across_ranks(m, &format!("{fam}_count"), false);
+            if count <= 0.0 || !count.is_finite() {
+                return None;
+            }
+            let sum = sum_across_ranks(m, &format!("{fam}_sum"), false);
+            if !sum.is_finite() || sum <= 0.0 {
+                None
+            } else {
+                Some(sum / count)
+            }
+        };
+        s.traffic.avg_prompt_len = mean("sglang:prompt_tokens_histogram");
+        s.traffic.avg_gen_len = mean("sglang:generation_tokens_histogram");
+        s.traffic.avg_uncached_len = mean("sglang:uncached_prompt_tokens_histogram");
+    }
 
     // --- RANKS ---
     build_ranks(m, now, s);
@@ -672,7 +849,7 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         assert!(s.kv.hicache.is_none(), "no hicache metrics → None");
 
         let with_hc = format!(
-            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\n"
+            "{FIXTURE}\nsglang:hicache_host_used_tokens{{dp_rank=\"0\"}} 100\nsglang:hicache_host_total_tokens{{dp_rank=\"0\"}} 400\nsglang:hicache_backup_tokens_total{{pool=\"kv\"}} 900\nsglang:hicache_dropped_tokens_total{{pool=\"kv\",reason=\"host_pressure\"}} 5\nsglang:load_back_tokens_total{{pool=\"kv\"}} 120\nsglang:hicache_prefetch_aux_alloc_failed_tokens_total{{storage_backend=\"nixl\"}} 30\n"
         );
         let mut s2 = Snapshot::default();
         build(
@@ -684,6 +861,9 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
         );
         let hc = s2.kv.hicache.expect("hicache present");
         assert_eq!(hc.host_used, 100);
+        assert_eq!(hc.backuped_total, Some(900));
+        assert_eq!(hc.dropped_total, Some(5));
+        assert_eq!(hc.load_back_total, Some(120));
         assert_eq!(hc.host_total, 400);
     }
 
@@ -882,5 +1062,109 @@ sglang:prompt_tokens_total{engine_type="unified",is_streaming="true",model_name=
         // realtime_tokens_total is present on this build → rates come from it
         // (values identical across the two scrapes → 0/s, but present).
         assert!(s.engine.decode_tps.is_some() && s.engine.prefill_tps.is_some());
+    }
+
+    // The server build's real names: num_retracted_reqs (not the legacy
+    // *_requests_total), plus the http_* / cached_tokens_total families the
+    // TRAFFIC panel now surfaces.
+    const HTTP_FIXTURE: &str = r#"
+sglang:num_retracted_reqs{engine_type="unified",tp_rank="0"} 4.0
+sglang:http_requests_total{endpoint="/generate",method="POST"} 100.0
+sglang:http_requests_total{endpoint="/metrics",method="GET"} 9000.0
+sglang:http_responses_total{endpoint="/generate",method="POST",status_code="200"} 95.0
+sglang:http_responses_total{endpoint="/generate",method="POST",status_code="500"} 5.0
+sglang:http_requests_active{endpoint="/generate",method="POST"} 2.0
+sglang:http_requests_active{endpoint="/metrics",method="GET"} 1.0
+sglang:cached_tokens_total{cache_source="device",engine_type="unified"} 1000.0
+sglang:cached_tokens_total{cache_source="host",engine_type="unified"} 500.0
+sglang:cached_tokens_total{cache_source="storage_HiCacheNixl",engine_type="unified"} 30.0
+sglang:prompt_tokens_histogram_sum{engine_type="unified"} 2000.0
+sglang:prompt_tokens_histogram_count{engine_type="unified"} 10.0
+sglang:generation_tokens_histogram_sum{engine_type="unified"} 500.0
+sglang:generation_tokens_histogram_count{engine_type="unified"} 10.0
+sglang:uncached_prompt_tokens_histogram_sum{engine_type="unified"} 100.0
+sglang:uncached_prompt_tokens_histogram_count{engine_type="unified"} 10.0
+sglang:evicted_tokens_total{cache_type="UnifiedRadixCache"} 7000.0
+sglang:process_cpu_seconds_total{component="tokenizer"} 100.0
+sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
+"#;
+
+    #[test]
+    fn http_and_cache_counters_use_real_names_and_exclude_our_polling() {
+        let m1 = prom::parse(HTTP_FIXTURE);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(&m1, &mut st, t0, Duration::from_millis(5), &mut s);
+
+        // Gauge-ish reads land on the first scrape already.
+        assert_eq!(s.traffic.retracted, 4, "num_retracted_reqs (real name)");
+        assert_eq!(
+            s.traffic.http_active,
+            Some(2),
+            "/metrics excluded from active"
+        );
+        assert_eq!(s.traffic.cached_device_total, 1000, "device source only");
+        assert_eq!(s.traffic.cached_host_total, 500);
+        assert_eq!(
+            s.traffic.cached_storage_total, 30,
+            "storage_<backend> matched by prefix"
+        );
+        assert_eq!(s.traffic.avg_prompt_len, Some(200.0), "sum/count");
+        assert_eq!(s.traffic.avg_gen_len, Some(50.0));
+        assert_eq!(s.traffic.avg_uncached_len, Some(10.0));
+        assert_eq!(s.kv.evicted_total, Some(7000));
+        assert!(s.traffic.http_rps.is_none(), "no baseline yet → N/A, not 0");
+        assert!(
+            s.engine.tokenizer_cores.is_none(),
+            "cpu cores need a baseline"
+        );
+
+        // Second scrape +2s: /generate grew 10 (rps 5), errors grew 2 (err/s 1),
+        // device cache grew 100 (50/s). /metrics grew a lot and must not count.
+        let m2 = prom::parse(
+            &HTTP_FIXTURE
+                .replace(
+                    "/generate\",method=\"POST\"} 100.0",
+                    "/generate\",method=\"POST\"} 110.0",
+                )
+                .replace(
+                    "/metrics\",method=\"GET\"} 9000.0",
+                    "/metrics\",method=\"GET\"} 9200.0",
+                )
+                .replace("status_code=\"500\"} 5.0", "status_code=\"500\"} 7.0")
+                .replace(
+                    "cache_source=\"device\",engine_type=\"unified\"} 1000.0",
+                    "cache_source=\"device\",engine_type=\"unified\"} 1100.0",
+                )
+                .replace(
+                    "component=\"tokenizer\"} 100.0",
+                    "component=\"tokenizer\"} 106.0",
+                )
+                .replace(
+                    "component=\"detokenizer\"} 10.0",
+                    "component=\"detokenizer\"} 12.0",
+                ),
+        );
+        build(
+            &m2,
+            &mut st,
+            t0 + Duration::from_secs(2),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        let rps = s.traffic.http_rps.unwrap();
+        assert!(
+            (rps - 5.0).abs() < 0.01,
+            "/generate-only rate, our polling excluded: {rps}"
+        );
+        let err = s.traffic.http_err_rate.unwrap();
+        assert!((err - 1.0).abs() < 0.01, "status>=400 rate: {err}");
+        let cps = s.traffic.cached_device_tps.unwrap();
+        assert!((cps - 50.0).abs() < 0.1, "device cache inflow: {cps}");
+        let tk = s.engine.tokenizer_cores.unwrap();
+        assert!((tk - 3.0).abs() < 0.05, "6 cpu-sec / 2s = 3 cores: {tk}");
+        let dk = s.engine.detokenizer_cores.unwrap();
+        assert!((dk - 1.0).abs() < 0.05, "detok cores: {dk}");
     }
 }

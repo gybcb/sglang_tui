@@ -15,15 +15,16 @@ pub struct Gui {
 }
 
 impl Gui {
-    /// The modern look — used by tests and as the fallback.
+    /// The modern (block-graph) look — used by tests only; the runtime
+    /// default is btop braille, built from `Config::graph_braille()`.
     pub const MODERN: Gui = Gui {
         braille_graphs: false,
     };
 }
 
-/// Style-dispatched area graph: modern solid `block` (default) or btop's
-/// braille dots (`--graph btop`). All panel call sites go through this so the
-/// style is a single config switch.
+/// Style-dispatched area graph: btop's braille dots (default) or modern
+/// solid `block` (`--graph block`). All panel call sites go through this so
+/// the style is a single config switch.
 pub fn area_graph(
     buf: &mut Buffer,
     area: Rect,

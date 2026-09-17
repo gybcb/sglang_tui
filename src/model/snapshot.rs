@@ -103,7 +103,15 @@ pub struct ServerMeta {
     pub enable_dp_attention: bool,
     pub enable_metrics_for_all_schedulers: bool,
     pub enable_hierarchical_cache: bool,
+    /// PD-disaggregation role (`disaggregation_mode` from /server_info):
+    /// "null" when unified. Gates the PD queue row — the gauges exist on every
+    /// server but are meaningless zeros unless disaggregation is on.
+    pub disaggregation_mode: String,
     pub max_total_num_tokens: Option<u64>,
+    /// Context window in tokens (`context_length` from /server_info, or the
+    /// `context_len` gauge) — with max_total_tokens it says how many
+    /// max-length sequences the pool can actually host.
+    pub context_len: Option<u64>,
     /// True once at least one info fetch has populated the above.
     pub loaded: bool,
 }
@@ -116,7 +124,11 @@ pub struct EnginePanel {
     pub gen_throughput: f64,
     pub gen_series: Ring,
     pub prefill_tps: Option<f64>,
+    /// Same-tick history of `prefill_tps` (N/A ticks push 0.0) — the
+    /// current/max readout's max window.
+    pub prefill_series: Ring,
     pub decode_tps: Option<f64>,
+    /// Same-tick history of `decode_tps` (N/A ticks push 0.0).
     pub token_rate_series: Ring,
     /// Engine-software busy ratio (labelled "engine busy").
     pub utilization: Option<f64>,
@@ -124,7 +136,11 @@ pub struct EnginePanel {
     pub fwd_occupancy: Option<f64>,
     pub running_reqs: u64,
     pub waiting_reqs: u64,
-    pub uptime: Option<Duration>,
+    /// Live CPU cores (cpu-seconds per wall-second) of the tokenizer and
+    /// detokenizer helper processes — the classic hidden SGLang bottleneck.
+    /// None = `process_cpu_seconds_total` absent.
+    pub tokenizer_cores: Option<f64>,
+    pub detokenizer_cores: Option<f64>,
 }
 
 impl Default for EnginePanel {
@@ -133,13 +149,15 @@ impl Default for EnginePanel {
             gen_throughput: 0.0,
             gen_series: Ring::default(),
             prefill_tps: None,
+            prefill_series: Ring::default(),
             decode_tps: None,
             token_rate_series: Ring::default(),
             utilization: None,
             fwd_occupancy: None,
             running_reqs: 0,
             waiting_reqs: 0,
-            uptime: None,
+            tokenizer_cores: None,
+            detokenizer_cores: None,
         }
     }
 }
@@ -157,8 +175,18 @@ pub struct KvPanel {
     pub full_token_usage: Option<f64>,
     pub swa_token_usage: Option<f64>,
     pub mamba_usage: Option<f64>,
+    /// Active slot counts for the hybrid sub-pools (mamba SSM / SWA window).
+    /// Absolute alongside the ratio: a small pool at 100% and a huge pool at
+    /// 100% read the same as a ratio but differ in urgency. None = family
+    /// absent (non-hybrid model) → no absolute shown.
+    pub swa_used: Option<u64>,
+    pub mamba_used: Option<u64>,
     pub available_tokens: Option<u64>,
     pub evictable_tokens: Option<u64>,
+    /// Lifetime tokens evicted from the device pool (`evicted_tokens_total`);
+    /// None = family absent → row hidden. Rate is over the rolling window.
+    pub evicted_total: Option<u64>,
+    pub evicted_tps: Option<f64>,
     pub cache_hit_rate: f64,
     pub cache_hit_series: Ring,
     pub weight_gb: Option<f64>,
@@ -172,7 +200,19 @@ pub struct KvPanel {
 pub struct HiCache {
     pub host_used: u64,
     pub host_total: u64,
-    pub hit_rate: Option<f64>,
+    /// Where evicted device tokens went: backed up to host
+    /// (`hicache_backup_tokens_total`) vs destroyed under host pressure
+    /// (`hicache_dropped_tokens_total`). None = counters absent.
+    /// backup+drop ≈ evicted — the split says whether HiCache keeps up.
+    pub backuped_total: Option<u64>,
+    pub dropped_total: Option<u64>,
+    /// Host→GPU reloads (`load_back_tokens_total`): backed-up tokens that
+    /// were actually reused. None = counter absent.
+    pub load_back_total: Option<u64>,
+    /// Storage-tier prefetch tokens that failed aux-pool allocation on arrival
+    /// (`hicache_prefetch_aux_alloc_failed_tokens_total`) — fetched data
+    /// thrown away because mamba/aux pools were full. None = counter absent.
+    pub prefetch_failed_total: Option<u64>,
 }
 
 impl Default for KvPanel {
@@ -186,8 +226,12 @@ impl Default for KvPanel {
             full_token_usage: None,
             swa_token_usage: None,
             mamba_usage: None,
+            swa_used: None,
+            mamba_used: None,
             available_tokens: None,
             evictable_tokens: None,
+            evicted_total: None,
+            evicted_tps: None,
             cache_hit_rate: 0.0,
             cache_hit_series: Ring::default(),
             weight_gb: None,
@@ -212,10 +256,35 @@ pub struct TrafficPanel {
     pub prompt_peak_tps: f64,
     pub prompt_total_tokens: u64,
     pub prompt_series: Ring,
-    // HTTP concurrency / rate
+    // HTTP concurrency / rate — sglang's own server counters (`http_*`
+    // families), with the `/metrics` endpoint excluded: sgtop's own polling
+    // would otherwise dominate the rate.
     pub http_rps: Option<f64>,
     pub http_err_rate: Option<f64>,
     pub http_active: Option<u64>,
+    /// Device prefix-cache inflow: rate (per second) and lifetime total of
+    /// `cached_tokens_total{cache_source="device"}`. Total/prompt-total is the
+    /// all-time cache share — the durable answer to "is caching working",
+    /// unlike the instantaneous hit gauge.
+    pub cached_device_tps: Option<f64>,
+    pub cached_device_total: u64,
+    /// HiCache tier totals from the same `cached_tokens_total` family, whose
+    /// `cache_source` label also carries `host` and `storage_*` (the storage
+    /// spelling carries the backend: `storage_HiCacheNixl`). On a
+    /// hierarchical-cache server the device-only share hides most of the wins
+    /// — here host hits routinely dwarf device hits. 0 = tier absent (no
+    /// such source on the server) → the tier isn't shown.
+    pub cached_host_total: u64,
+    pub cached_storage_total: u64,
+    /// Mean request length (tokens), from the request-length histograms'
+    /// sum/count — cumulative means over all served requests. Histogram
+    /// medians would need bucket arithmetic; the mean is exact and cheap.
+    pub avg_prompt_len: Option<f64>,
+    pub avg_gen_len: Option<f64>,
+    /// Mean *computed* prompt length (`uncached_prompt_tokens_histogram`):
+    /// what prefill actually processes after cache hits. Against avg_prompt_len
+    /// it turns the cache ratio into per-request work saved.
+    pub avg_uncached_len: Option<f64>,
     // queue breakdown — btop's per-direction rows
     pub req_rate_in: f64,
     pub req_rate_out: f64,
@@ -224,6 +293,14 @@ pub struct TrafficPanel {
     pub retracted: u64,
     pub paused: u64,
     pub grammar_queue: u64,
+    /// PD-disaggregation queues: prefill-bootstrap waiting for KV, prefill
+    /// in-flight, decode-prealloc waiting for slots, decode-transfer handing
+    /// off KV. Only rendered when `disaggregation_mode` != null — the gauges
+    /// exist on every server but are misleading zeros for a unified one.
+    pub pd_prefill_bootstrap: Option<u64>,
+    pub pd_prefill_inflight: Option<u64>,
+    pub pd_decode_prealloc: Option<u64>,
+    pub pd_decode_transfer: Option<u64>,
     pub latency: LatencySet,
 }
 
@@ -264,6 +341,13 @@ impl Default for TrafficPanel {
             http_rps: None,
             http_err_rate: None,
             http_active: None,
+            cached_device_tps: None,
+            cached_device_total: 0,
+            cached_host_total: 0,
+            cached_storage_total: 0,
+            avg_prompt_len: None,
+            avg_gen_len: None,
+            avg_uncached_len: None,
             req_rate_in: 0.0,
             req_rate_out: 0.0,
             total_requests: 0,
@@ -271,6 +355,10 @@ impl Default for TrafficPanel {
             retracted: 0,
             paused: 0,
             grammar_queue: 0,
+            pd_prefill_bootstrap: None,
+            pd_prefill_inflight: None,
+            pd_decode_prealloc: None,
+            pd_decode_transfer: None,
             latency: LatencySet::default(),
         }
     }

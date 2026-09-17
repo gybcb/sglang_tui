@@ -286,7 +286,7 @@ impl App {
             panels::engine(&snap, th, gui, l.engine, f.buffer_mut());
         }
         if self.boxes.kv && l.kv.height > 2 {
-            panels::kv(&snap, th, l.kv, f.buffer_mut());
+            panels::kv(&snap, th, gui, l.kv, f.buffer_mut());
         }
         if self.boxes.traffic && l.traffic.height > 2 {
             panels::traffic(&snap, th, gui, l.traffic, f.buffer_mut());

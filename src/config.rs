@@ -37,8 +37,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 8_388_608)]
     pub max_metrics_bytes: u64,
 
-    /// Graph style: `block` (solid half-block area) or `btop` (braille dots).
-    #[arg(long, default_value = "block")]
+    /// Graph style: `btop` (braille dots, default) or `block` (solid
+    /// half-block area).
+    #[arg(long, default_value = "btop")]
     pub graph: String,
 
     /// Path to a config file; defaults to `$XDG_CONFIG_HOME/sgtop/config.toml`.
@@ -61,7 +62,7 @@ pub struct Config {
     pub theme: String,
     pub color_mode: String,
     pub max_metrics_bytes: u64,
-    /// Graph style: "block" (modern solid) or "btop" (braille).
+    /// Graph style: "btop" (braille, default) or "block" (modern solid).
     pub graph: String,
     pub round_corners: bool,
     /// Layout percentage/geometry prefs mirroring btop's box toggles.
@@ -81,7 +82,7 @@ impl Default for Config {
             theme: "default".into(),
             color_mode: "auto".into(),
             max_metrics_bytes: 8_388_608,
-            graph: "block".into(),
+            graph: "btop".into(),
             round_corners: true,
             cpu_bottom: false,
             mem_below_net: false,
@@ -120,7 +121,7 @@ impl Config {
         if cli.max_metrics_bytes != 8_388_608 {
             cfg.max_metrics_bytes = cli.max_metrics_bytes;
         }
-        if cli.graph != "block" {
+        if cli.graph != "btop" {
             cfg.graph = cli.graph.clone();
         }
         cfg.interval_ms = cfg.interval_ms.clamp(100, 10_000);
@@ -206,6 +207,16 @@ mod tests {
         let cli = Cli::try_parse_from(["sgtop", "-i", "5"]).unwrap();
         let cfg = Config::build(&cli);
         assert_eq!(cfg.interval_ms, 100);
+    }
+
+    #[test]
+    fn graph_defaults_to_btop_style() {
+        assert_eq!(Config::default().graph, "btop");
+        let cli = Cli::try_parse_from(["sgtop"]).unwrap();
+        assert!(Config::build(&cli).graph_braille());
+        // Block stays opt-in.
+        let cli = Cli::try_parse_from(["sgtop", "--graph", "block"]).unwrap();
+        assert!(!Config::build(&cli).graph_braille());
     }
 
     #[test]

@@ -229,6 +229,24 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
             .unwrap_or_else(|| "—".into()),
         th,
     ));
+    v.push(meta_row(
+        "context_len",
+        &s.context_len
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+        th,
+    ));
+    // Names the topology the traffic panel's `pd` row depends on: "null" is
+    // sglang's own spelling for a unified server, which reads as a bug.
+    v.push(meta_row(
+        "disaggregation",
+        match s.disaggregation_mode.as_str() {
+            "" => "—",
+            "null" => "unified",
+            other => other,
+        },
+        th,
+    ));
     if !s.loaded {
         v.push(Line::from(Span::styled(
             "metadata not yet fetched (auth-gated /server_info)",

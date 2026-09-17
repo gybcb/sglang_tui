@@ -151,22 +151,15 @@ pub fn ranks(
     let sel = clamp_sel(sel, s.ranks.len());
     let order = order(s, col, reverse);
     let inner_h = rect.height.saturating_sub(2) as usize;
-    // Interior rows: header (1) + rule (1) + data (rows_h) + page footer (1).
-    if inner_h < 4 {
+    // Interior rows: header (1) + data (rows_h) + page footer (1).
+    if inner_h < 2 {
         return;
     }
-    let rows_h = inner_h - 3;
+    let rows_h = inner_h - 2;
     let scroll = scroll_for(sel, rows_h);
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h + 1);
     lines.push(Line::from(header_spans(col, reverse, th)));
-    // A divider under the header bars (modern-table idiom), in `div_line`,
-    // spanning the numeric block so it reads as a column-set separator rather
-    // than a stray line.
-    lines.push(Line::from(vec![Span::styled(
-        "─".repeat(NUM_COLS),
-        Style::default().fg(th.c("div_line")),
-    )]));
 
     for &i in order.iter().skip(scroll).take(rows_h) {
         let r = &s.ranks[i];
@@ -209,7 +202,7 @@ pub fn ranks(
         ]));
     }
 
-    while lines.len() < rows_h + 2 {
+    while lines.len() < rows_h + 1 {
         lines.push(Line::from(""));
     }
 
@@ -237,7 +230,7 @@ pub fn ranks(
     if gw >= 6 {
         let gx = rect.x + 1 + NUM_COLS as u16;
         for (k, &i) in order.iter().skip(scroll).take(rows_h).enumerate() {
-            let y = rect.y + 1 + 2 + k as u16; // below the header + rule lines
+            let y = rect.y + 1 + 1 + k as u16; // below the header line
             let area = Rect {
                 x: gx,
                 y,
@@ -475,30 +468,6 @@ mod tests {
         assert!(text.contains("gen/s▲"), "sort column marked: {text}");
         let rev = rendered(&s, 0, SortCol::Gen, true, 66, 8);
         assert!(rev.contains("gen/s▼"), "reverse arrow: {rev}");
-    }
-
-    #[test]
-    fn header_rule_divides_titles_from_rows() {
-        let s = snap_with(2);
-        let th = Theme::builtin("Default", ColorMode::TrueColor);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 66, 12));
-        ranks(
-            &s,
-            &th,
-            crate::ui::widgets::Gui::MODERN,
-            Rect::new(0, 0, 66, 12),
-            &mut buf,
-            0,
-            SortCol::Rank,
-            false,
-        );
-        // Interior row 1 (just under the header titles) is the divider.
-        let rule: String = (1..65).map(|x| buf[(x, 2)].symbol().to_owned()).collect();
-        assert!(
-            rule.starts_with(&"─".repeat(NUM_COLS)),
-            "rule spans the numeric block: {rule:?}"
-        );
-        assert_eq!(buf[(5, 2)].style().fg, Some(th.c("div_line")));
     }
 
     #[test]

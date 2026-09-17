@@ -9,7 +9,7 @@ const RIGHT: [u16; 4] = [0b0000_1000, 0b0001_0000, 0b0010_0000, 0b1000_0000];
 const BASE: u16 = 0x2800;
 
 /// btop's dotted placeholder inside an empty graph region.
-const BG: char = '⣤';
+const BG: char = '⣀';
 
 /// Render `series` (oldest→newest) into `area` as a btop-style braille area
 /// graph: 2 samples per cell, filled bottom-up to each sample's value, each
@@ -40,7 +40,7 @@ pub fn draw(
         for x in 0..w {
             let c = &mut buf[(area.x + x as u16, area.y + y as u16)];
             c.set_symbol(&BG.to_string());
-            c.set_style(Style::default().fg(th.c("div_line")));
+            c.set_style(Style::default().fg(th.c("inactive_fg")));
         }
     }
     if series.is_empty() {
@@ -163,13 +163,18 @@ mod tests {
             None,
             true,
         );
-        // Bottom char row (y=1) must show a braille glyph, not background.
+        // Bottom char row (y=1) must carry a gradient-coloured dot, not the
+        // background. With the background now '⣀' (btop's own glyph), a
+        // baseline dot is the *same character* — colour is the only
+        // distinguisher.
         let g = glyph(&b, 2, 1);
-        assert_ne!(g, BG, "no_zero paints the baseline dot");
         assert!(
             ('\u{2800}'..='\u{28ff}').contains(&g),
             "a braille char: {g}"
         );
+        let fg = b[(2, 1)].style().fg;
+        assert_ne!(fg, Some(th.c("inactive_fg")), "no_zero paints baseline dot");
+        assert_eq!(fg, Some(th.grad("cpu", 0)), "baseline uses the ramp");
     }
 
     #[test]
