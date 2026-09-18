@@ -10,28 +10,32 @@ pub struct BoxSpec {
 }
 
 /// ENGINE ~ cpu box, KV ~ mem, TRAFFIC ~ net, RANKS ~ proc.
+///
+/// Min widths are tuned so the full four-box grid fits a 55-column phone
+/// terminal (btop's own 60-wide floor would leave it showing `toosmall`);
+/// rows clip at the frame edge via write_lines rather than hiding data.
 pub const ENGINE: BoxSpec = BoxSpec {
     width_p: 100,
     height_p: 32,
-    min_width: 60,
+    min_width: 55,
     min_height: 8,
 };
 pub const KV: BoxSpec = BoxSpec {
     width_p: 45,
     height_p: 40,
-    min_width: 36,
+    min_width: 24,
     min_height: 10,
 };
 pub const TRAFFIC: BoxSpec = BoxSpec {
     width_p: 45,
     height_p: 28,
-    min_width: 36,
+    min_width: 24,
     min_height: 6,
 };
 pub const RANKS: BoxSpec = BoxSpec {
     width_p: 55,
     height_p: 68,
-    min_width: 44,
+    min_width: 31,
     min_height: 16,
 };
 
