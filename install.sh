@@ -36,12 +36,11 @@ api="https://api.github.com/repos/${REPO}/releases"
 if [ -n "${SGTOP_VERSION:-}" ]; then
   tag="$SGTOP_VERSION"
 else
-  # /latest 302-redirects; grabbing Location is cheaper than parsing JSON
-  # (and immune to unauthenticated-API rate limits returning JSON errors).
-  tag=$(curl -fsSI "$api/latest" \
-        | tr -d '\r' \
-        | awk -F/ '/^location: /{print $NF; exit}' \
-        | awk -F'releases/tag/' '{print $NF}')
+  # Parse tag_name out of the JSON with awk — no jq dependency.
+  tag=$(curl -fsSL "$api/latest" \
+        | tr -d '\n ' \
+        | awk -F'"tag_name":"' '{print $2; exit}' \
+        | awk -F'"' '{print $1}')
   [ -n "$tag" ] || die "could not determine the latest release (check network)"
 fi
 version="${tag#v}"
