@@ -263,6 +263,46 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
         },
         th,
     ));
+    // Speculative decoding (EAGLE/MTP) detail. The engine panel's row shows
+    // the payoff (accept length × accept rate); this is the config and the
+    // flow behind it — tree shape, per-step cap, and how many verifies/s the
+    // decoder is actually running (idle gauges hold their last values, so
+    // the verify rate is what separates speculating-now from idle). Placed
+    // with the live operating facts above the one-time startup timeline, so
+    // it stays on a 40-row screen instead of clipping below the fold.
+    if let Some(sp) = &snap.engine.spec {
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "spec decode",
+            Style::default().fg(th.c("title")).bold(),
+        )));
+        let num = |v: Option<f64>| v.map(|x| format!("{x:.2}")).unwrap_or_else(|| "—".into());
+        v.push(wide_row(
+            "accept rate",
+            &sp.accept_rate
+                .map(crate::ui::panels::human::human_pct)
+                .unwrap_or_else(|| "—".into()),
+            th,
+        ));
+        v.push(wide_row("accept length", &num(sp.accept_length), th));
+        let shape = match (sp.steps, sp.draft_tokens) {
+            (Some(s_), Some(d)) => format!("{s_:.0} steps · {d:.0} draft tok"),
+            _ => "—".into(),
+        };
+        v.push(wide_row("tree", &shape, th));
+        v.push(wide_row("cap length", &num(sp.cap_length), th));
+        v.push(wide_row("block accept", &num(sp.block_accept_length), th));
+        let verify = match (sp.verify_per_s, sp.verify_total) {
+            (Some(r), Some(t)) => format!(
+                "{}/s  total {}",
+                crate::ui::panels::human::human_rate_frac(r),
+                crate::ui::panels::human::human_count(t),
+            ),
+            (Some(r), None) => format!("{}/s", crate::ui::panels::human::human_rate_frac(r)),
+            _ => "—".into(),
+        };
+        v.push(wide_row("verify calls", &verify, th));
+    }
     // Startup timeline: why boot took as long as it did, without logs.
     if !s.startup_phases.is_empty() {
         v.push(Line::from(""));
@@ -654,5 +694,47 @@ mod tests {
         // Long path truncated at the label column, with its error count.
         assert!(text.contains("/v1/responses/input…"), "{text}");
         assert!(text.contains("err 60"), "{text}");
+    }
+
+    #[test]
+    fn server_info_shows_spec_decode_block() {
+        let mut snap = Snapshot::default();
+        snap.server.loaded = true;
+        snap.engine.spec = Some(crate::model::snapshot::SpecInfo {
+            accept_rate: Some(0.3667),
+            accept_length: Some(2.1),
+            steps: Some(3.0),
+            draft_tokens: Some(4.0),
+            cap_length: Some(0.0),
+            block_accept_length: Some(0.0),
+            verify_per_s: Some(83.3),
+            verify_total: Some(7995),
+        });
+        let text = render_overlay(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &snap,
+            false,
+            1000,
+            80,
+            44,
+        );
+        assert!(text.contains("spec decode"), "{text}");
+        assert!(text.contains("37%"), "{text}");
+        assert!(text.contains("3 steps · 4 draft tok"), "{text}");
+        assert!(text.contains("83.3/s  total 8.00k"), "{text}");
+
+        // No family → the block disappears entirely (no zero-filled fake).
+        let off = Snapshot::default();
+        let text = render_overlay(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &off,
+            false,
+            1000,
+            80,
+            44,
+        );
+        assert!(!text.contains("spec decode"), "{text}");
     }
 }

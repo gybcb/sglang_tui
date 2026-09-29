@@ -362,6 +362,34 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
         };
     }
     s.engine.new_token_ratio = first_val("sglang:new_token_ratio");
+    // Speculative decoding (EAGLE/MTP): gated on the family appearing at
+    // all — a server without speculation exposes no spec_* series, and a
+    // 0%-accept panel would claim a dead decoder instead of no decoder.
+    {
+        let spec_gauge = |name: &str| first_val(name).filter(|v| !v.is_nan());
+        if m.get("sglang:spec_accept_length").next().is_some() {
+            let spec = crate::model::snapshot::SpecInfo {
+                accept_rate: spec_gauge("sglang:spec_accept_rate"),
+                accept_length: spec_gauge("sglang:spec_accept_length"),
+                steps: spec_gauge("sglang:spec_num_steps"),
+                draft_tokens: spec_gauge("sglang:spec_num_draft_tokens"),
+                cap_length: spec_gauge("sglang:spec_cap_length"),
+                block_accept_length: spec_gauge("sglang:spec_block_accept_length"),
+                verify_per_s: rate_of(m, rates, "sglang:spec_verify_calls_total", now),
+                verify_total: sum_if_present(m, "sglang:spec_verify_calls_total")
+                    .filter(|v| !v.is_nan())
+                    .map(|v| v.max(0.0) as u64),
+            };
+            // An all-NaN scrape (server up, gauges never written) is a
+            // missing reading, not a zero-accepting decoder.
+            let known = spec.accept_rate.is_some()
+                || spec.accept_length.is_some()
+                || spec.verify_per_s.is_some();
+            s.engine.spec = known.then_some(spec);
+        } else {
+            s.engine.spec = None;
+        }
+    }
     // Startup timeline (constant after boot; rides the meta section of the
     // info overlay). Longest phase first — the headline is the bottleneck.
     {
@@ -1070,6 +1098,79 @@ sglang:num_grammar_queue_reqs{model_name="qwen",engine_type="unified",tp_rank="0
             "{:?}",
             s.engine.new_token_ratio
         );
+    }
+
+    /// The whole spec_* family as the live server reports it (m11 dump,
+    /// labels trimmed), plus a verify counter grown between scrapes.
+    const SPEC_FIXTURE: &str = r#"
+sglang:spec_accept_length{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 2.1
+sglang:spec_accept_rate{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 0.36666666666666664
+sglang:spec_cap_length{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 0.0
+sglang:spec_block_accept_length{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 0.0
+sglang:spec_num_steps{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 3.0
+sglang:spec_num_draft_tokens{engine_type="unified",model_name="pennyroyal",tp_rank="0"} 4.0
+sglang:spec_verify_calls_total{engine_type="unified",model_name="pennyroyal"} VERIFIES
+"#;
+
+    fn spec_builds(second: &str) -> Snapshot {
+        let f1 = SPEC_FIXTURE.replace("VERIFIES", "7995.0");
+        let f2 = SPEC_FIXTURE.replace("VERIFIES", second);
+        let m1 = prom::parse(&f1);
+        let m2 = prom::parse(&f2);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        let t0 = Instant::now();
+        build(&m1, &mut st, t0, Duration::ZERO, &mut s);
+        build(
+            &m2,
+            &mut st,
+            t0 + Duration::from_secs(1),
+            Duration::ZERO,
+            &mut s,
+        );
+        s
+    }
+
+    #[test]
+    fn spec_family_populates_every_field() {
+        let s = spec_builds("8995.0");
+        let sp = s.engine.spec.expect("family present → Some");
+        assert!((sp.accept_rate.unwrap() - 0.366_666_666_666_666_6).abs() < 1e-9);
+        assert!((sp.accept_length.unwrap() - 2.1).abs() + 0.0 < 1e-9);
+        assert_eq!(sp.steps, Some(3.0));
+        assert_eq!(sp.draft_tokens, Some(4.0));
+        assert_eq!(sp.cap_length, Some(0.0), "a real zero stays, not N/A");
+        assert_eq!(sp.block_accept_length, Some(0.0));
+        // 1000 verifies over the 1s window.
+        assert!((sp.verify_per_s.unwrap() - 1000.0).abs() < 1e-6);
+        assert_eq!(sp.verify_total, Some(8995));
+    }
+
+    #[test]
+    fn spec_absent_family_is_none_not_zero() {
+        let m = prom::parse(FIXTURE);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(&m, &mut st, Instant::now(), Duration::ZERO, &mut s);
+        assert!(
+            s.engine.spec.is_none(),
+            "no spec_* series → the server does not speculate"
+        );
+    }
+
+    #[test]
+    fn spec_all_nan_scrape_is_none() {
+        let f = SPEC_FIXTURE
+            .replace("} 2.1", "} NaN")
+            .replace("} 0.36666666666666664", "} NaN");
+        // The counter still baselines, but no instantaneous reading means
+        // we know nothing about acceptance — hide the readout.
+        let f = f.replace("VERIFIES", "100.0");
+        let m = prom::parse(&f);
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(&m, &mut st, Instant::now(), Duration::ZERO, &mut s);
+        assert!(s.engine.spec.is_none(), "all-NaN gauges → N/A, not 0");
     }
 
     #[test]

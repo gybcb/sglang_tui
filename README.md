@@ -24,7 +24,7 @@ Prometheus `/metrics`.
 
 | Panel | Content |
 |---|---|
-| **engine** | gen / prefill / decode token rates, engine busy meter (software forward-time ratio — not GPU util), CUDA-graph coverage, admission pressure, helper-process CPU |
+| **engine** | gen / prefill / decode token rates, engine busy meter (software forward-time ratio — not GPU util), CUDA-graph coverage, admission pressure, speculative-decoding yield (accept length × accept rate), helper-process CPU |
 | **token pool** | KV pool used/available/evictable with sub-pool bars (full / SWA / mamba), prefix-cache hit rate, eviction flow, HiCache tiers when hierarchical cache is on |
 | **traffic** | token in/out current·peak·accumulated, request rate, HTTP rps/active/errors per route, cache share (all-time + 30s window), request-length means, latency percentiles |
 | **ranks** | one row per DP rank: running/waiting/used tokens/usage/gen throughput/cache hit — plus an aggregate row |

@@ -125,11 +125,16 @@ pub fn engine(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) 
     lines.push(Line::from(row3));
 
     // Engine internals that fail silently: CUDA-graph coverage (decode falls
-    // out of graphs without an error — throughput drops, logs stay clean)
-    // and the admission-pressure dial (low ratio = scheduler throttling for
-    // memory). Hidden until the families exist — both are build/version
-    // gated, and an absent one must not squat the row.
-    if s.engine.cg_decode_share.is_some() || s.engine.new_token_ratio.is_some() {
+    // out of graphs without an error — throughput drops, logs stay clean),
+    // the admission-pressure dial (low ratio = scheduler throttling for
+    // memory) and speculative-decoding yield (accept length below ~1.5 means
+    // the drafter is mostly rejected — wasted verify passes). Hidden until
+    // the families exist — all are build/version gated, and an absent one
+    // must not squat the row.
+    if s.engine.cg_decode_share.is_some()
+        || s.engine.new_token_ratio.is_some()
+        || s.engine.spec.is_some()
+    {
         let mut row4: Vec<Span> = Vec::new();
         if let Some(sh) = s.engine.cg_decode_share {
             row4.push(Span::styled(
@@ -161,6 +166,26 @@ pub fn engine(s: &Snapshot, th: &Theme, gui: Gui, rect: Rect, buf: &mut Buffer) 
                 format!("{:>4.0}%", ntr * 100.0),
                 Style::default().fg(th.c("main_fg")),
             ));
+        }
+        // Spec-decode headline: mean accepted tokens per forward is the
+        // payoff number (1.0 = the drafter contributes nothing beyond the
+        // bonus token); the instantaneous accept rate colours it — a
+        // sub-50% decoder is spending more verify than it recovers.
+        if let Some(sp) = &s.engine.spec {
+            if !row4.is_empty() {
+                row4.push(Span::styled("  ", Style::default()));
+            }
+            row4.push(Span::styled(
+                "spec ",
+                Style::default().fg(th.c("title")).bold(),
+            ));
+            row4.push(value_cell(
+                sp.accept_length.map(|v| format!("{v:.2}×")),
+                7,
+                th,
+                dim,
+            ));
+            row4.push(value_cell(sp.accept_rate.map(human_pct), 6, th, dim));
         }
         lines.push(Line::from(row4));
     }
@@ -1019,6 +1044,28 @@ mod tests {
         s2.engine.running_reqs = 3;
         let none = render_engine(&s2);
         assert!(!none.contains("ctx"), "{none}");
+    }
+
+    // The spec readout rides row4 and only appears with the spec_* family —
+    // a non-speculating server must not show a `0%` accept that reads as a
+    // broken decoder. accept_length is the `×` payoff, accept_rate the %.
+    #[test]
+    fn spec_column_appears_only_with_the_family() {
+        use crate::model::snapshot::SpecInfo;
+        let mut s = Snapshot::default();
+        s.engine.spec = Some(SpecInfo {
+            accept_rate: Some(0.3667),
+            accept_length: Some(2.1),
+            ..Default::default()
+        });
+        let text = render_engine(&s);
+        assert!(text.contains("spec"), "{text}");
+        assert!(text.contains("2.10×") && text.contains("37%"), "{text}");
+
+        // No family → the whole spec label is gone (row4 may still exist for
+        // cg/admit, but must carry no spec text).
+        let none = render_engine(&Snapshot::default());
+        assert!(!none.contains("spec"), "{none}");
     }
 
     #[test]

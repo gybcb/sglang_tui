@@ -164,6 +164,38 @@ pub struct EnginePanel {
     /// pool tightens — low alongside high token-usage means the scheduler is
     /// throttling admission for memory. None = family absent.
     pub new_token_ratio: Option<f64>,
+    /// Speculative decoding (EAGLE/MTP) health. None = the spec_* family is
+    /// absent = the server runs without speculative decoding (not zero).
+    pub spec: Option<SpecInfo>,
+}
+
+/// One scrape's view of the speculative-decoding (`sglang:spec_*`) family.
+/// The per-fwd means (`accept_length`, `accept_rate`) are instantaneous
+/// gauges — sglang's own ratio of accepted draft tokens; the `_total`
+/// counter turns them into a live verify rate, which is what distinguishes a
+/// decoder that is speculating now from one whose idle gauges still read
+/// `2.1 tok/fwd`. Absent (older servers without the family) reads as `None`.
+#[derive(Debug, Clone, Default)]
+pub struct SpecInfo {
+    /// Accepted fraction of drafted tokens, instantaneous (0..1).
+    pub accept_rate: Option<f64>,
+    /// Mean accepted tokens per forward pass, including the bonus token.
+    pub accept_length: Option<f64>,
+    /// `spec_num_draft_tokens / spec_num_steps` give the tree shape: steps
+    /// and draft tokens the drafter proposes per verify.
+    pub steps: Option<f64>,
+    pub draft_tokens: Option<f64>,
+    /// `spec_cap_length`: the DSpark confidence-scheduled verify window per
+    /// step (0 = no cap scheduled).
+    pub cap_length: Option<f64>,
+    /// `spec_block_accept_length`: uncapped full-block accept length per
+    /// verify step (exact only in DSpark cap-accept mode).
+    pub block_accept_length: Option<f64>,
+    /// Verifies per second, from `spec_verify_calls_total` (windowed).
+    /// None until a baseline exists.
+    pub verify_per_s: Option<f64>,
+    /// Lifetime verify calls (the counter itself).
+    pub verify_total: Option<u64>,
 }
 
 impl Default for EnginePanel {
@@ -184,6 +216,7 @@ impl Default for EnginePanel {
             cg_decode_share: None,
             decode_ctx_sum: None,
             new_token_ratio: None,
+            spec: None,
         }
     }
 }
