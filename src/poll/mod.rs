@@ -292,6 +292,12 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
     s.kv.total_tokens = sum_across_ranks(m, "sglang:max_total_num_tokens", true) as u64;
     // The info overlay reads it from ServerMeta; the gauge is the owner.
     s.server.max_total_num_tokens = Some(s.kv.total_tokens);
+    // context_len's other source, `/server_info`, is auth-gated: if that fetch
+    // fails the gauge is what keeps the overlay row honest instead of a
+    // permanent `—`. Both are the same number; only /metrics is always free.
+    if let Some(v) = first_val("sglang:context_len") {
+        s.server.context_len = Some(v as u64);
+    }
     // token_usage is documented (sg_metrics.py:87) as max(full, swa, mamba)
     // per rank — the bottleneck. Cross-rank aggregate: max.
     s.kv.token_usage = max_val(m, "sglang:token_usage");
@@ -1988,6 +1994,24 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
             s.traffic.http_endpoints.iter().all(|e| e.path != "/ghost"),
             "unlisted error route stays out"
         );
+    }
+
+    // context_len's second source is the /metrics gauge — the /server_info
+    // route it usually comes from is auth-gated, and when that fetch fails
+    // this is what keeps the overlay from lying with a permanent `—`.
+    #[test]
+    fn context_len_gauge_fills_meta_without_server_info() {
+        let m = prom::parse("sglang:context_len{engine_type=\"unified\",tp_rank=\"0\"} 524288.0\n");
+        let mut st = PollState::default();
+        let mut s = Snapshot::default();
+        build(
+            &m,
+            &mut st,
+            Instant::now(),
+            Duration::from_millis(5),
+            &mut s,
+        );
+        assert_eq!(s.server.context_len, Some(524288));
     }
 
     // The windowed cache share is a *ratio*, not another counter: it needs
