@@ -562,12 +562,15 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             })
             .collect();
         let mut agg: Option<f64> = None;
-        // (window_rps, lifetime_total, lifetime_errors) per route. Errors are
-        // joined from http_responses_total{status>=400} on the endpoint label
-        // below — an aggregate err_rate hides *which* route is failing, and
-        // a client hammering a wrong-method route reads identical to healthy
-        // traffic there.
-        let mut by_ep: std::collections::BTreeMap<String, (Option<f64>, u64, u64)> =
+        // (window_rps, lifetime_total, lifetime_errors, lifetime_server_errors)
+        // per route. Errors are joined from http_responses_total{status>=400}
+        // on the endpoint label below — an aggregate err_rate hides *which*
+        // route is failing, and a client hammering a wrong-method route reads
+        // identical to healthy traffic there. The 5xx subset splits
+        // client-fault (4xx) from server-fault (5xx): an all-4xx route is a
+        // misbehaving client against a healthy server, and colouring that the
+        // same alarm red as a genuine 5xx cries wolf.
+        let mut by_ep: std::collections::BTreeMap<String, (Option<f64>, u64, u64, u64)> =
             std::collections::BTreeMap::new();
         for (key, endpoint, value) in &req_pts {
             let r = rates.rate(key, now, *value);
@@ -602,28 +605,32 @@ pub fn build(m: &prom::Metrics, st: &mut PollState, now: Instant, rtt: Duration,
             rates.rate_sum(now, err_pts.iter().map(|(k, v)| (k.as_str(), *v)))
         };
         for x in m.get("sglang:http_responses_total") {
-            let err = x
+            let status = x
                 .label("status_code")
                 .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0)
-                >= 400;
-            if err && !mine(x) && x.value.is_finite() {
+                .unwrap_or(0);
+            if status >= 400 && !mine(x) && x.value.is_finite() {
                 let ep = x.label("endpoint").unwrap_or("?");
                 // Only routes the requests family already listed; an error on
                 // an unlisted route is folded into the aggregate, not faked in.
                 if let Some(e) = by_ep.get_mut(ep) {
                     e.2 += x.value as u64;
+                    // 5xx is the subset that means the server itself failed.
+                    if status >= 500 {
+                        e.3 += x.value as u64;
+                    }
                 }
             }
         }
         let mut eps: Vec<crate::model::snapshot::HttpEndpoint> = by_ep
             .into_iter()
             .map(
-                |(path, (rps, total, err))| crate::model::snapshot::HttpEndpoint {
+                |(path, (rps, total, err, server_err))| crate::model::snapshot::HttpEndpoint {
                     path,
                     rps,
                     total,
                     err,
+                    server_err,
                 },
             )
             .collect();
@@ -1932,8 +1939,11 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
             format!(
                 "sglang:http_requests_total{{endpoint=\"/good\"}} {req}\n\
                  sglang:http_requests_total{{endpoint=\"/bad\"}} {req}\n\
+                 sglang:http_requests_total{{endpoint=\"/crash\"}} {req}\n\
                  sglang:http_responses_total{{endpoint=\"/good\",status_code=\"200\"}} {req}\n\
-                 sglang:http_responses_total{{endpoint=\"/bad\",status_code=\"405\"}} {err}\n"
+                 sglang:http_responses_total{{endpoint=\"/bad\",status_code=\"405\"}} {err}\n\
+                 sglang:http_responses_total{{endpoint=\"/crash\",status_code=\"400\"}} 4\n\
+                 sglang:http_responses_total{{endpoint=\"/crash\",status_code=\"503\"}} {err}\n"
             )
         };
         let mut st = PollState::default();
@@ -1954,7 +1964,13 @@ sglang:process_cpu_seconds_total{component="detokenizer"} 10.0
                 .unwrap()
         };
         assert_eq!(find("/bad").err, 10, "all its responses were 405");
+        assert_eq!(find("/bad").server_err, 0, "405 is the client's fault");
         assert_eq!(find("/good").err, 0);
+        // A mixed route: 4×400 + 10×503 → err counts both, server_err only
+        // the 5xx. The overlay colours this row as a real fault.
+        let crash = find("/crash");
+        assert_eq!(crash.err, 14);
+        assert_eq!(crash.server_err, 10, "only the 503s are server faults");
         // Errors on a route the requests family never listed are not faked
         // into the endpoint list; they live only in the aggregate.
         build(

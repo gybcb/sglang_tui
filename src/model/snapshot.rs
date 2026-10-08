@@ -358,6 +358,12 @@ pub struct HttpEndpoint {
     /// wrong-method endpoint looks identical to healthy traffic in the
     /// aggregate err_rate).
     pub err: u64,
+    /// Subset of `err` with status >= 500. The split earns its rows: a route
+    /// whose errors are all 4xx is a misbehaving *client* (405 on a wrong
+    /// method) and the server is fine — painting that the same alarm red as
+    /// a 5xx (the server itself failing) cries wolf. Zero with err>0 → all
+    /// client-side.
+    pub server_err: u64,
 }
 
 /// Left bottom — btop's NET-box analog. The NET triple is current/peak/accum

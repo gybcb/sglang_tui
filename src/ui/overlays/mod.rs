@@ -415,10 +415,12 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
                 path.push(ch);
             }
             // human_rate_frac: same decimal-low-QPS rule as the traffic
-            // panel's rps row. A route with errors gets a ` err N` tail in
-            // the alarm colour — the aggregate err_rate can't say *which*
-            // route is failing, and a client hammering a wrong-method route
-            // otherwise reads as healthy.
+            // panel's rps row. A route with errors gets a ` err N` tail —
+            // the aggregate err_rate can't say *which* route is failing.
+            // 5xx colours the row in the alarm colour (the server itself
+            // failed); 4xx-only is muted: a client hammering a wrong-method
+            // route is the client's bug, and painting it as a server fault
+            // is a false alarm worse than no alarm.
             let value = if e.err > 0 {
                 format!(
                     "{}/s  total {}  err {}",
@@ -433,19 +435,19 @@ fn server_lines(cfg: &Config, snap: &Snapshot, th: &Theme) -> Vec<Line<'static>>
                     crate::ui::panels::human::human_count(e.total),
                 )
             };
+            let fg = if e.server_err > 0 {
+                th.c("hi_fg")
+            } else if e.err > 0 {
+                th.c("graph_text")
+            } else {
+                th.c("main_fg")
+            };
             v.push(Line::from(vec![
                 Span::styled(
                     format!("{path:<20}"),
                     Style::default().fg(th.c("title")).bold(),
                 ),
-                Span::styled(
-                    value,
-                    Style::default().fg(if e.err > 0 {
-                        th.c("hi_fg")
-                    } else {
-                        th.c("main_fg")
-                    }),
-                ),
+                Span::styled(value, Style::default().fg(fg)),
             ]));
         }
     }
@@ -666,15 +668,17 @@ mod tests {
                 rps: Some(12.0),
                 total: 34567,
                 err: 0,
+                server_err: 0,
             },
             // A route being hammered with the wrong method: healthy-looking
-            // rate, every response an error. The aggregate err_rate can't
+            // rate, every response a 4xx. The aggregate err_rate can't
             // localise this; the route row must.
             crate::model::snapshot::HttpEndpoint {
                 path: "/v1/responses/input_tokens".into(),
                 rps: Some(0.0),
                 total: 60,
                 err: 60,
+                server_err: 0,
             },
         ];
         let text = render_overlay(
@@ -694,6 +698,72 @@ mod tests {
         // Long path truncated at the label column, with its error count.
         assert!(text.contains("/v1/responses/input…"), "{text}");
         assert!(text.contains("err 60"), "{text}");
+    }
+
+    // Colour encodes fault ownership: a 5xx route (the server itself failed)
+    // gets the alarm colour; a 4xx-only route (client's bug — wrong method,
+    // bad params) is muted. Painting 405s the same red as 500s is a false
+    // alarm, worse than no alarm.
+    #[test]
+    fn http_route_colour_follows_error_ownership() {
+        let th = Theme::builtin("Default", ColorMode::TrueColor);
+        let mut snap = Snapshot::default();
+        snap.server.loaded = true;
+        snap.traffic.http_endpoints = vec![
+            crate::model::snapshot::HttpEndpoint {
+                path: "/generate".into(),
+                rps: Some(1.0),
+                total: 100,
+                err: 3,
+                server_err: 3, // one real 500 hides in here
+            },
+            crate::model::snapshot::HttpEndpoint {
+                path: "/v1/responses/input_tokens".into(),
+                rps: Some(1.0),
+                total: 149,
+                err: 149,
+                server_err: 0, // every one a 405
+            },
+        ];
+        let (w, h) = (80u16, 40u16);
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        render(
+            Overlay::ServerInfo,
+            &Config::default(),
+            &snap,
+            Live {
+                paused: false,
+                interval_ms: 1000,
+            },
+            &th,
+            Rect::new(0, 0, w, h),
+            &mut buf,
+        );
+        let alarm = th.c("hi_fg");
+        let muted = th.c("graph_text");
+        // Read a route row's value colour: scan for the row whose text holds
+        // the needle, then take the fg of the first value cell — the path
+        // label is exactly 20 columns wide, so the value starts at x0 + 20.
+        let row_fg = |needle: &str| -> Option<ratatui::style::Color> {
+            let mut chars: Vec<char> = needle.chars().collect();
+            chars.truncate(19); // the label column ellipsises the tail
+            for y in 0..h {
+                for x in 0..w.saturating_sub(chars.len() as u16 + 20) {
+                    if (0..chars.len() as u16).all(|i| {
+                        buf[(x + i, y)]
+                            .symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c == chars[i as usize])
+                    }) {
+                        return buf[(x + 20, y)].style().fg;
+                    }
+                }
+            }
+            panic!("route {needle} not rendered");
+        };
+        assert_eq!(row_fg("/generate"), Some(alarm));
+        assert_eq!(row_fg("/v1/responses"), Some(muted));
     }
 
     #[test]
